@@ -5,6 +5,7 @@ public enum MeetingReviewMarkdownFormatter {
         review: MeetingReviewSnapshot,
         cards: [SuggestionCard] = [],
         aiSummary: MeetingAISummary? = nil,
+        meetingParticipants: [MeetingParticipantRecord] = [],
         diagnostics: MeetingDiagnosticsReport? = nil,
         backlogDrafts: [BacklogIssueDraft] = [],
         documentChangeProposals: [DocumentChangeProposal] = []
@@ -17,6 +18,19 @@ public enum MeetingReviewMarkdownFormatter {
             "- 所要時間: \(duration(review.endedAt.timeIntervalSince(review.startedAt)))",
             ""
         ]
+
+        lines.append("## 参加者名簿")
+        lines.append("")
+        if meetingParticipants.isEmpty {
+            lines.append("- 未登録")
+        } else {
+            for participant in meetingParticipants {
+                lines.append(
+                    "- \(singleLine(participant.displayName))（\(participant.role.displayName)）"
+                )
+            }
+        }
+        lines.append("")
 
         lines.append("## AI会議要約")
         lines.append("")

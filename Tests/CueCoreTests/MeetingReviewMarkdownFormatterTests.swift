@@ -50,7 +50,15 @@ struct MeetingReviewMarkdownFormatterTests {
                 markdown: "### 概要\n仕様と担当を確認した。",
                 evidence: [],
                 provider: .codex
-            )
+            ),
+            meetingParticipants: [
+                MeetingParticipantRecord(
+                    meetingID: meetingID,
+                    participantID: UUID(),
+                    displayName: "田中さん",
+                    role: .client
+                )
+            ]
         )
 
         #expect(markdown.contains("# 要件定義会議"))
@@ -58,6 +66,7 @@ struct MeetingReviewMarkdownFormatterTests {
         #expect(markdown.contains("**移行リスク**（確信度 82%）"))
         #expect(markdown.contains("[01:05] **自分**: 確認します。"))
         #expect(markdown.contains("所要時間: 2分5秒"))
+        #expect(markdown.contains("- 田中さん（クライアント）"))
         #expect(markdown.contains("## AI会議要約"))
         #expect(markdown.contains("仕様と担当を確認した。"))
     }

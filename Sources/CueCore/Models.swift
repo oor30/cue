@@ -140,6 +140,84 @@ public struct ProjectConfiguration: Identifiable, Codable, Hashable, Sendable {
     }
 }
 
+public enum ParticipantRole: String, Codable, CaseIterable, Hashable, Sendable {
+    case internalMember
+    case contractor
+    case client
+    case other
+
+    public var displayName: String {
+        switch self {
+        case .internalMember: "社内"
+        case .contractor: "外注"
+        case .client: "クライアント"
+        case .other: "その他"
+        }
+    }
+}
+
+public struct ParticipantProfile: Identifiable, Codable, Hashable, Sendable {
+    public let id: UUID
+    public var displayName: String
+    public var role: ParticipantRole
+    public var projectIDs: [UUID]
+    public var notes: String
+    public var archivedAt: Date?
+    public let createdAt: Date
+    public var updatedAt: Date
+
+    public init(
+        id: UUID = UUID(),
+        displayName: String,
+        role: ParticipantRole,
+        projectIDs: [UUID] = [],
+        notes: String = "",
+        archivedAt: Date? = nil,
+        createdAt: Date = Date(),
+        updatedAt: Date = Date()
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.role = role
+        self.projectIDs = projectIDs
+        self.notes = notes
+        self.archivedAt = archivedAt
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+
+    public var isProjectCommon: Bool { projectIDs.isEmpty }
+
+    public func isAvailable(in projectID: UUID) -> Bool {
+        isProjectCommon || projectIDs.contains(projectID)
+    }
+}
+
+public struct MeetingParticipantRecord: Identifiable, Codable, Hashable, Sendable {
+    public let id: UUID
+    public let meetingID: UUID
+    public let participantID: UUID
+    public let displayName: String
+    public let role: ParticipantRole
+    public let assignedAt: Date
+
+    public init(
+        id: UUID = UUID(),
+        meetingID: UUID,
+        participantID: UUID,
+        displayName: String,
+        role: ParticipantRole,
+        assignedAt: Date = Date()
+    ) {
+        self.id = id
+        self.meetingID = meetingID
+        self.participantID = participantID
+        self.displayName = displayName
+        self.role = role
+        self.assignedAt = assignedAt
+    }
+}
+
 public enum MeetingStatus: String, Codable, Sendable {
     case preparing
     case active
@@ -221,6 +299,7 @@ public struct TranscriptSegment: Identifiable, Codable, Hashable, Sendable {
     public var isFinal: Bool
     public var revision: Int
     public var confidence: Double?
+    public var speakerParticipantID: UUID?
     public var speakerLabel: String?
     public let createdAt: Date
 
@@ -235,6 +314,7 @@ public struct TranscriptSegment: Identifiable, Codable, Hashable, Sendable {
         isFinal: Bool,
         revision: Int = 0,
         confidence: Double? = nil,
+        speakerParticipantID: UUID? = nil,
         speakerLabel: String? = nil,
         createdAt: Date = Date()
     ) {
@@ -248,6 +328,7 @@ public struct TranscriptSegment: Identifiable, Codable, Hashable, Sendable {
         self.isFinal = isFinal
         self.revision = revision
         self.confidence = confidence
+        self.speakerParticipantID = speakerParticipantID
         self.speakerLabel = speakerLabel
         self.createdAt = createdAt
     }
@@ -627,6 +708,7 @@ public struct MeetingContextEnvelope: Codable, Sendable {
     public let relatedEvidence: [EvidenceReference]
     public let projectSearchPolicy: ProjectSearchPolicy?
     public let projectBrief: [ProjectBriefItem]
+    public let participantRoster: [MeetingParticipantRecord]
 
     public init(
         meetingID: UUID,
@@ -636,7 +718,8 @@ public struct MeetingContextEnvelope: Codable, Sendable {
         sourceEvent: DetectedEvent,
         relatedEvidence: [EvidenceReference],
         projectSearchPolicy: ProjectSearchPolicy? = nil,
-        projectBrief: [ProjectBriefItem] = []
+        projectBrief: [ProjectBriefItem] = [],
+        participantRoster: [MeetingParticipantRecord] = []
     ) {
         self.meetingID = meetingID
         self.topic = topic
@@ -646,6 +729,7 @@ public struct MeetingContextEnvelope: Codable, Sendable {
         self.relatedEvidence = relatedEvidence
         self.projectSearchPolicy = projectSearchPolicy
         self.projectBrief = projectBrief
+        self.participantRoster = participantRoster
     }
 }
 

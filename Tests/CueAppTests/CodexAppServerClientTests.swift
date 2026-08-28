@@ -114,7 +114,7 @@ struct CodexAppServerClientTests {
         printf '%s\n' '{"id":1,"result":{"userAgent":"fake","codexHome":"/tmp","platformFamily":"unix","platformOs":"macos"}}'
         IFS= read -r initialized
         IFS= read -r thread_start
-        sleep 2
+        sleep 4
         """
         try Data(script.utf8).write(to: server)
         try fileManager.setAttributes(
@@ -125,7 +125,7 @@ struct CodexAppServerClientTests {
         let client = CodexAppServerClient(
             executableURL: server,
             codexHomeOverride: temporary.appending(path: "codex-home"),
-            requestTimeout: .milliseconds(500)
+            requestTimeout: .seconds(2)
         )
         try await client.start()
         do {

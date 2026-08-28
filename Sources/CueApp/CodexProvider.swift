@@ -239,6 +239,7 @@ actor CodexProvider: AIProvider {
         deepモードではProject Root内の資料・ソース・Git履歴を読み取り調査し、根拠を付けてください。
         根拠が不足する場合は断定せず、確認すべき質問を提示してください。
         Meeting Context JSONのprojectBriefは同一Projectの過去会議から抽出した最大5件の参考情報です。
+        participantRosterは今回の参加予定者です。speakerLabelまたはspeakerParticipantIDがない発言を、名簿上の人物へ推測で帰属させないでください。
         過去の決定を現在も有効と断定せず、現在の発言と不一致なら仕様変更または確認事項として提示してください。
 
         \(modeInstructions)

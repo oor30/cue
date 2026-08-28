@@ -270,6 +270,29 @@ private struct MeetingReviewView: View {
                     reviewMetric("リスク", review.risks.count, color: .orange)
                 }
 
+                if !model.meetingParticipantRecords.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("参加者名簿", systemImage: "person.3")
+                            .font(.headline)
+                        LazyVGrid(
+                            columns: [GridItem(.adaptive(minimum: 150), alignment: .leading)],
+                            alignment: .leading,
+                            spacing: 8
+                        ) {
+                            ForEach(model.meetingParticipantRecords) { participant in
+                                Text("\(participant.displayName)（\(participant.role.displayName)）")
+                                    .font(.caption)
+                                    .padding(.horizontal, 9)
+                                    .padding(.vertical, 5)
+                                    .background(
+                                        .quaternary,
+                                        in: Capsule()
+                                    )
+                            }
+                        }
+                    }
+                }
+
                 MeetingAISummarySection(model: model)
 
                 reviewSection("決定事項", values: review.decisions, symbol: "checkmark.seal")
@@ -583,6 +606,49 @@ private struct StartMeetingView: View {
                 GroupBox("音声入力") {
                     AudioCaptureSelectionView(model: model)
                         .padding(.top, 4)
+                }
+                .frame(maxWidth: 520)
+
+                GroupBox("今回の参加者") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if model.availableParticipantsForSelectedProject.isEmpty {
+                            Text("設定の参加者マスターから、このプロジェクトの参加者を登録できます。")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(model.availableParticipantsForSelectedProject) { participant in
+                                Toggle(
+                                    isOn: Binding(
+                                        get: {
+                                            model.selectedNextMeetingParticipantIDs.contains(
+                                                participant.id
+                                            )
+                                        },
+                                        set: { selected in
+                                            let isSelected = model
+                                                .selectedNextMeetingParticipantIDs
+                                                .contains(participant.id)
+                                            if selected != isSelected {
+                                                model.toggleNextMeetingParticipant(participant)
+                                            }
+                                        }
+                                    )
+                                ) {
+                                    HStack {
+                                        Text(participant.displayName)
+                                        Text(participant.role.displayName)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                        }
+                        Text("選択した名簿は会議記録に保存され、文字起こしの話者割り当て候補になります。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 4)
                 }
                 .frame(maxWidth: 520)
 

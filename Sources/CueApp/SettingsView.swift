@@ -12,7 +12,13 @@ struct SettingsView: View {
     @State private var customProfilePrompt = ""
     @State private var projectPrompt = ""
     @State private var meetingPrompt = ""
-    @State private var participantNames = ""
+    @State private var participantName = ""
+    @State private var participantRole: ParticipantRole = .internalMember
+    @State private var participantIsProjectCommon = true
+    @State private var participantProjectIDs: Set<UUID> = []
+    @State private var participantNotes = ""
+    @State private var editingParticipantID: UUID?
+    @State private var showArchivedParticipants = false
     @State private var backlogBaseURL = ""
     @State private var backlogProjectID = ""
     @State private var backlogIssueTypeID = ""
@@ -86,6 +92,125 @@ struct SettingsView: View {
                 }
             }
 
+            Section("参加者マスター") {
+                HStack {
+                    Text("登録済み")
+                        .font(.headline)
+                    Spacer()
+                    Toggle("アーカイブを表示", isOn: $showArchivedParticipants)
+                        .toggleStyle(.switch)
+                }
+
+                ForEach(visibleParticipants) { participant in
+                    HStack {
+                        Button {
+                            editParticipant(participant)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 3) {
+                                HStack(spacing: 6) {
+                                    Text(participant.displayName)
+                                    Text(participant.role.displayName)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                    if participant.archivedAt != nil {
+                                        Text("アーカイブ")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                Text(scopeDescription(participant))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .buttonStyle(.plain)
+
+                        Button(participant.archivedAt == nil ? "アーカイブ" : "復元") {
+                            Task {
+                                await model.setParticipantArchived(
+                                    participant,
+                                    archived: participant.archivedAt == nil
+                                )
+                                if editingParticipantID == participant.id {
+                                    resetParticipantEditor()
+                                }
+                            }
+                        }
+                        .disabled(model.activeMeeting != nil)
+                    }
+                }
+
+                Divider()
+                Text(editingParticipantID == nil ? "参加者を追加" : "参加者を編集")
+                    .font(.headline)
+                TextField("表示名", text: $participantName)
+                    .textFieldStyle(.roundedBorder)
+                Picker("区分", selection: $participantRole) {
+                    ForEach(ParticipantRole.allCases, id: \.rawValue) { role in
+                        Text(role.displayName).tag(role)
+                    }
+                }
+                Toggle("全プロジェクト共通", isOn: $participantIsProjectCommon)
+                if !participantIsProjectCommon {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("関係するプロジェクト（複数選択可）")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        ForEach(model.projects.filter { $0.archivedAt == nil }) { project in
+                            Toggle(
+                                project.name,
+                                isOn: Binding(
+                                    get: { participantProjectIDs.contains(project.id) },
+                                    set: { selected in
+                                        if selected {
+                                            participantProjectIDs.insert(project.id)
+                                        } else {
+                                            participantProjectIDs.remove(project.id)
+                                        }
+                                    }
+                                )
+                            )
+                        }
+                    }
+                    .padding(.leading, 8)
+                }
+                TextField("所属・役割などのメモ（任意）", text: $participantNotes)
+                    .textFieldStyle(.roundedBorder)
+                HStack {
+                    if editingParticipantID != nil {
+                        Button("新規入力に戻す") {
+                            resetParticipantEditor()
+                        }
+                    }
+                    Spacer()
+                    Button(editingParticipantID == nil ? "追加" : "更新") {
+                        let projectIDs = participantIsProjectCommon
+                            ? []
+                            : Array(participantProjectIDs)
+                        Task {
+                            await model.saveParticipant(
+                                id: editingParticipantID,
+                                displayName: participantName,
+                                role: participantRole,
+                                projectIDs: projectIDs,
+                                notes: participantNotes
+                            )
+                            resetParticipantEditor()
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(
+                        participantName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                            (!participantIsProjectCommon && participantProjectIDs.isEmpty) ||
+                            model.activeMeeting != nil
+                    )
+                }
+                Text("社内メンバーは全プロジェクト共通、外注は複数プロジェクト、クライアントは該当プロジェクトのみ、という形で登録できます。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("AI") {
                 Picker("Provider", selection: $provider) {
                     ForEach(AIProviderKind.allCases, id: \.rawValue) { kind in
@@ -114,11 +239,6 @@ struct SettingsView: View {
                     text: $meetingPrompt,
                     prompt: "次回会議だけで重視すること"
                 )
-                promptEditor(
-                    "参加者ラベル",
-                    text: $participantNames,
-                    prompt: "田中さん\n佐藤さん（1行1名）"
-                )
                 LabeledContent("権限", value: "Read-Only")
                 Toggle("Web自動検索を許可", isOn: $webSearchEnabled)
                     .disabled(provider == .claudeCode)
@@ -141,8 +261,7 @@ struct SettingsView: View {
                                 webSearchEnabled: webSearchEnabled,
                                 customProfilePrompt: customProfilePrompt,
                                 projectPrompt: projectPrompt,
-                                meetingPrompt: meetingPrompt,
-                                participantNames: lines(participantNames)
+                                meetingPrompt: meetingPrompt
                             )
                         }
                     }
@@ -285,7 +404,6 @@ struct SettingsView: View {
             customProfilePrompt = ""
             projectPrompt = ""
             meetingPrompt = ""
-            participantNames = ""
             backlogBaseURL = ""
             backlogProjectID = ""
             backlogIssueTypeID = ""
@@ -302,7 +420,6 @@ struct SettingsView: View {
         customProfilePrompt = project.customProfilePrompt
         projectPrompt = project.projectPrompt
         meetingPrompt = project.meetingPrompt
-        participantNames = project.participantNames.joined(separator: "\n")
         if let backlog = project.backlogConfiguration {
             backlogBaseURL = backlog.baseURL.absoluteString
             backlogProjectID = String(backlog.projectID)
@@ -319,5 +436,39 @@ struct SettingsView: View {
 
     private func lines(_ value: String) -> [String] {
         value.components(separatedBy: .newlines)
+    }
+
+    private var visibleParticipants: [ParticipantProfile] {
+        model.participants.filter {
+            showArchivedParticipants || $0.archivedAt == nil
+        }
+    }
+
+    private func editParticipant(_ participant: ParticipantProfile) {
+        editingParticipantID = participant.id
+        participantName = participant.displayName
+        participantRole = participant.role
+        participantIsProjectCommon = participant.isProjectCommon
+        participantProjectIDs = Set(participant.projectIDs)
+        participantNotes = participant.notes
+    }
+
+    private func resetParticipantEditor() {
+        editingParticipantID = nil
+        participantName = ""
+        participantRole = .internalMember
+        participantIsProjectCommon = true
+        participantProjectIDs = []
+        participantNotes = ""
+    }
+
+    private func scopeDescription(_ participant: ParticipantProfile) -> String {
+        if participant.isProjectCommon {
+            return "全プロジェクト共通"
+        }
+        let names = participant.projectIDs.compactMap { projectID in
+            model.projects.first(where: { $0.id == projectID })?.name
+        }
+        return names.isEmpty ? "対象プロジェクトなし" : names.joined(separator: "、")
     }
 }

@@ -8,7 +8,10 @@ import UniformTypeIdentifiers
 @Observable
 final class AppModel {
     var projects: [ProjectConfiguration] = []
+    var participants: [ParticipantProfile] = []
     var selectedProjectID: UUID?
+    var selectedNextMeetingParticipantIDs: Set<UUID> = []
+    var meetingParticipantRecords: [MeetingParticipantRecord] = []
     var activeMeeting: MeetingRecord?
     var transcript: [TranscriptSegment] = []
     var cards: [SuggestionCard] = []
@@ -103,6 +106,13 @@ final class AppModel {
         projectMeetings.filter { showArchivedMeetings || $0.archivedAt == nil }
     }
 
+    var availableParticipantsForSelectedProject: [ParticipantProfile] {
+        guard let selectedProjectID else { return [] }
+        return participants.filter {
+            $0.archivedAt == nil && $0.isAvailable(in: selectedProjectID)
+        }
+    }
+
     var selectedProviderDisplayName: String {
         selectedProject?.provider.displayName ?? "AI"
     }
@@ -169,6 +179,7 @@ final class AppModel {
 
         Task { [weak self] in
             await self?.loadProjects()
+            await self?.loadParticipants()
             await self?.refreshProjectBrief()
             self?.configureDesktopIntegration()
         }
@@ -236,8 +247,104 @@ final class AppModel {
 
     func selectProject(_ project: ProjectConfiguration) {
         selectedProjectID = project.id
+        selectedNextMeetingParticipantIDs = selectedNextMeetingParticipantIDs
+            .intersection(
+                Set(
+                    participants
+                        .filter { $0.archivedAt == nil && $0.isAvailable(in: project.id) }
+                        .map(\.id)
+                )
+            )
         Task { [weak self] in
             await self?.refreshProjectBrief()
+        }
+    }
+
+    func toggleNextMeetingParticipant(_ participant: ParticipantProfile) {
+        guard activeMeeting == nil,
+              let selectedProjectID,
+              participant.archivedAt == nil,
+              participant.isAvailable(in: selectedProjectID)
+        else { return }
+        if selectedNextMeetingParticipantIDs.contains(participant.id) {
+            selectedNextMeetingParticipantIDs.remove(participant.id)
+        } else {
+            selectedNextMeetingParticipantIDs.insert(participant.id)
+        }
+    }
+
+    func saveParticipant(
+        id: UUID? = nil,
+        displayName: String,
+        role: ParticipantRole,
+        projectIDs: [UUID],
+        notes: String
+    ) async {
+        guard activeMeeting == nil else {
+            startupError = "参加者マスターは会議を開始する前に変更してください。"
+            return
+        }
+        let normalizedName = displayName.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard !normalizedName.isEmpty else {
+            startupError = "参加者名を入力してください。"
+            return
+        }
+        guard !participants.contains(where: {
+            $0.id != id &&
+                $0.displayName.compare(
+                    normalizedName,
+                    options: [.caseInsensitive, .diacriticInsensitive]
+                ) == .orderedSame
+        }) else {
+            startupError = "同じ表示名の参加者がすでに登録されています。"
+            return
+        }
+        let now = Date()
+        var participant: ParticipantProfile
+        if let id,
+           let existing = participants.first(where: { $0.id == id }) {
+            participant = existing
+            participant.displayName = normalizedName
+            participant.role = role
+            participant.projectIDs = normalizedParticipantProjectIDs(projectIDs)
+            participant.notes = notes.trimmingCharacters(in: .whitespacesAndNewlines)
+            participant.updatedAt = now
+        } else {
+            participant = ParticipantProfile(
+                displayName: normalizedName,
+                role: role,
+                projectIDs: normalizedParticipantProjectIDs(projectIDs),
+                notes: notes.trimmingCharacters(in: .whitespacesAndNewlines),
+                createdAt: now,
+                updatedAt: now
+            )
+        }
+        do {
+            try await repository?.saveParticipant(participant)
+            await loadParticipants()
+            startupError = "参加者マスターを保存しました。"
+        } catch {
+            startupError = "参加者マスターを保存できませんでした。\n\(error.localizedDescription)"
+        }
+    }
+
+    func setParticipantArchived(
+        _ participant: ParticipantProfile,
+        archived: Bool
+    ) async {
+        guard activeMeeting == nil,
+              var updated = participants.first(where: { $0.id == participant.id })
+        else { return }
+        updated.archivedAt = archived ? Date() : nil
+        updated.updatedAt = Date()
+        do {
+            try await repository?.saveParticipant(updated)
+            selectedNextMeetingParticipantIDs.remove(updated.id)
+            await loadParticipants()
+        } catch {
+            startupError = "参加者のアーカイブ状態を保存できませんでした。\n\(error.localizedDescription)"
         }
     }
 
@@ -390,6 +497,9 @@ final class AppModel {
                 uniquingKeysWith: { _, latest in latest }
             )
             lastDiagnostics = try await repository?.diagnostics(meetingID: meetingID)
+            meetingParticipantRecords = try await repository?.meetingParticipants(
+                meetingID: meetingID
+            ) ?? []
             meetingAISummary = try await repository?.meetingSummary(meetingID: meetingID)
             meetingSummaryStatus = meetingAISummary == nil
                 ? "AI要約はまだありません"
@@ -471,7 +581,8 @@ final class AppModel {
                 sourceEvent: event,
                 relatedEvidence: [],
                 projectSearchPolicy: ProjectSearchPolicy(project: project),
-                projectBrief: projectBriefItems
+                projectBrief: projectBriefItems,
+                participantRoster: meetingParticipantRecords
             )
             let request = AnalysisRequest(
                 id: analysisID,
@@ -551,8 +662,7 @@ final class AppModel {
         webSearchEnabled: Bool,
         customProfilePrompt: String,
         projectPrompt: String,
-        meetingPrompt: String,
-        participantNames: [String]
+        meetingPrompt: String
     ) async {
         guard activeMeeting == nil,
               let selectedProjectID,
@@ -571,7 +681,6 @@ final class AppModel {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         projects[index].meetingPrompt = meetingPrompt
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        projects[index].participantNames = normalizedPathList(participantNames)
         do {
             try await repository?.saveProject(projects[index])
             startupError = "AI・Profile設定を保存しました。"
@@ -629,12 +738,29 @@ final class AppModel {
         )
         do {
             try await repository?.createMeeting(meeting)
+            let roster = availableParticipantsForSelectedProject
+                .filter { selectedNextMeetingParticipantIDs.contains($0.id) }
+                .map {
+                    MeetingParticipantRecord(
+                        meetingID: meeting.id,
+                        participantID: $0.id,
+                        displayName: $0.displayName,
+                        role: $0.role
+                    )
+                }
+            try await repository?.replaceMeetingParticipants(
+                meetingID: meeting.id,
+                participants: roster
+            )
+            meetingParticipantRecords = roster
             try await transcriptionService.start(
                 meetingID: meeting.id,
                 sources: audioConfiguration.enabledSources
             )
         } catch {
             meeting.status = .failed
+            try? await repository?.updateMeeting(meeting)
+            meetingParticipantRecords = []
             startupError = error.localizedDescription
             return
         }
@@ -1032,6 +1158,7 @@ final class AppModel {
         meetingAISummary = nil
         meetingSummaryStatus = nil
         isGeneratingMeetingSummary = false
+        meetingParticipantRecords = []
         reviewFocusSegmentID = nil
         transcript = []
         cards = []
@@ -1068,6 +1195,7 @@ final class AppModel {
             review: review,
             cards: cards,
             aiSummary: meetingAISummary,
+            meetingParticipants: meetingParticipantRecords,
             diagnostics: lastDiagnostics,
             backlogDrafts: backlogDrafts,
             documentChangeProposals: documentChangeProposal.map { [$0] } ?? []
@@ -1237,7 +1365,12 @@ final class AppModel {
     }
 
     var availableSpeakerLabels: [String] {
-        ["参加者"] + (selectedProject?.participantNames ?? [])
+        var labels = meetingParticipantRecords.map(\.displayName)
+        if labels.isEmpty {
+            labels = availableParticipantsForSelectedProject.map(\.displayName)
+        }
+        labels.append(contentsOf: selectedProject?.participantNames ?? [])
+        return ["参加者"] + normalizedPathList(labels)
     }
 
     func assignSpeakerLabel(
@@ -1247,6 +1380,10 @@ final class AppModel {
         guard let index = transcript.firstIndex(where: { $0.id == segmentID })
         else { return }
         let normalized = label?.trimmingCharacters(in: .whitespacesAndNewlines)
+        transcript[index].speakerParticipantID = normalized.flatMap { name in
+            meetingParticipantRecords.first(where: { $0.displayName == name })?.participantID
+                ?? participants.first(where: { $0.displayName == name })?.id
+        }
         transcript[index].speakerLabel = (normalized?.isEmpty == false)
             ? normalized
             : nil
@@ -1385,6 +1522,23 @@ final class AppModel {
                 ?? projects.first?.id
         } catch {
             startupError = error.localizedDescription
+        }
+    }
+
+    private func loadParticipants() async {
+        do {
+            participants = try await repository?.participants() ?? []
+            let validIDs = Set(availableParticipantsForSelectedProject.map(\.id))
+            selectedNextMeetingParticipantIDs.formIntersection(validIDs)
+        } catch {
+            startupError = "参加者マスターを読み込めませんでした。\n\(error.localizedDescription)"
+        }
+    }
+
+    private func normalizedParticipantProjectIDs(_ values: [UUID]) -> [UUID] {
+        let knownProjectIDs = Set(projects.map(\.id))
+        return Array(Set(values).intersection(knownProjectIDs)).sorted {
+            $0.uuidString < $1.uuidString
         }
     }
 
@@ -1873,7 +2027,8 @@ final class AppModel {
             projectSearchPolicy: activeMeeting.flatMap { meeting in
                 projects.first(where: { $0.id == meeting.projectID })
             }.map(ProjectSearchPolicy.init),
-            projectBrief: projectBriefItems
+            projectBrief: projectBriefItems,
+            participantRoster: meetingParticipantRecords
         )
         let request = AnalysisRequest(
             id: analysisID,

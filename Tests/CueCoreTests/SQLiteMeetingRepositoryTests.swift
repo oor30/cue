@@ -67,6 +67,14 @@ struct SQLiteMeetingRepositoryTests {
         )
         let project = ProjectConfiguration(name: "Test", rootPath: directory.path)
         try await repository.saveProject(project)
+        let participant = ParticipantProfile(
+            displayName: "田中さん",
+            role: .client,
+            projectIDs: [project.id],
+            createdAt: Date(timeIntervalSince1970: 990),
+            updatedAt: Date(timeIntervalSince1970: 990)
+        )
+        try await repository.saveParticipant(participant)
 
         let meeting = MeetingRecord(
             projectID: project.id,
@@ -92,9 +100,24 @@ struct SQLiteMeetingRepositoryTests {
             startTime: 1,
             endTime: 2,
             text: "この仕様で進めます",
-            isFinal: true
+            isFinal: true,
+            speakerParticipantID: participant.id,
+            speakerLabel: participant.displayName
         )
         try await repository.upsertTranscript(segment)
+        let roster = [
+            MeetingParticipantRecord(
+                meetingID: meeting.id,
+                participantID: participant.id,
+                displayName: participant.displayName,
+                role: participant.role,
+                assignedAt: Date(timeIntervalSince1970: 1_005)
+            )
+        ]
+        try await repository.replaceMeetingParticipants(
+            meetingID: meeting.id,
+            participants: roster
+        )
 
         let summary = MeetingAISummary(
             meetingID: meeting.id,
@@ -147,6 +170,10 @@ struct SQLiteMeetingRepositoryTests {
         try await repository.saveAnalysisRecord(analysis)
 
         let projects = try await repository.listProjects()
+        let participants = try await repository.participants()
+        let meetingParticipants = try await repository.meetingParticipants(
+            meetingID: meeting.id
+        )
         let segments = try await repository.recentSegments(meetingID: meeting.id)
         let storedDiagnostics = try await repository.diagnostics(meetingID: meeting.id)
         let analyses = try await repository.analysisRecords(meetingID: meeting.id)
@@ -154,10 +181,13 @@ struct SQLiteMeetingRepositoryTests {
         let storedSummary = try await repository.meetingSummary(meetingID: meeting.id)
 
         #expect(projects == [project])
+        #expect(participants == [participant])
+        #expect(meetingParticipants == roster)
         #expect(segments.count == 1)
         #expect(segments.first?.id == segment.id)
         #expect(segments.first?.text == segment.text)
         #expect(segments.first?.isFinal == true)
+        #expect(segments.first?.speakerParticipantID == participant.id)
         #expect(storedDiagnostics == diagnostics)
         #expect(analyses == [analysis])
         #expect(pauseIntervals == [pauseInterval])

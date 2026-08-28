@@ -86,6 +86,45 @@ public actor SQLiteMeetingRepository {
         }
     }
 
+    public func saveParticipant(_ participant: ParticipantProfile) throws {
+        let payload = try String(
+            decoding: encoder.encode(participant),
+            as: UTF8.self
+        )
+        try execute(
+            """
+            INSERT INTO participant_profiles (id, display_name, role, payload, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                display_name = excluded.display_name,
+                role = excluded.role,
+                payload = excluded.payload,
+                updated_at = excluded.updated_at;
+            """,
+            bindings: [
+                participant.id.uuidString,
+                participant.displayName,
+                participant.role.rawValue,
+                payload,
+                Self.timestamp(participant.updatedAt)
+            ]
+        )
+    }
+
+    public func participants() throws -> [ParticipantProfile] {
+        try query(
+            "SELECT payload FROM participant_profiles ORDER BY display_name COLLATE NOCASE;"
+        ) { statement in
+            guard let text = sqlite3_column_text(statement, 0) else {
+                throw RepositoryError.decode("participant payload is null")
+            }
+            return try decoder.decode(
+                ParticipantProfile.self,
+                from: Data(String(cString: text).utf8)
+            )
+        }
+    }
+
     public func createMeeting(_ meeting: MeetingRecord) throws {
         try execute(
             """
@@ -120,6 +159,68 @@ public actor SQLiteMeetingRepository {
                 meeting.id.uuidString
             ]
         )
+    }
+
+    public func replaceMeetingParticipants(
+        meetingID: UUID,
+        participants: [MeetingParticipantRecord]
+    ) throws {
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            try execute(
+                "DELETE FROM meeting_participants WHERE meeting_id = ?;",
+                bindings: [meetingID.uuidString]
+            )
+            for participant in participants {
+                guard participant.meetingID == meetingID else {
+                    throw RepositoryError.bind(
+                        "meeting participant belongs to another meeting"
+                    )
+                }
+                let payload = try String(
+                    decoding: encoder.encode(participant),
+                    as: UTF8.self
+                )
+                try execute(
+                    """
+                    INSERT INTO meeting_participants
+                        (meeting_id, participant_id, payload, assigned_at)
+                    VALUES (?, ?, ?, ?);
+                    """,
+                    bindings: [
+                        meetingID.uuidString,
+                        participant.participantID.uuidString,
+                        payload,
+                        Self.timestamp(participant.assignedAt)
+                    ]
+                )
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+    }
+
+    public func meetingParticipants(
+        meetingID: UUID
+    ) throws -> [MeetingParticipantRecord] {
+        try query(
+            """
+            SELECT payload FROM meeting_participants
+            WHERE meeting_id = ?
+            ORDER BY assigned_at, rowid;
+            """,
+            bindings: [meetingID.uuidString]
+        ) { statement in
+            guard let text = sqlite3_column_text(statement, 0) else {
+                throw RepositoryError.decode("meeting participant payload is null")
+            }
+            return try decoder.decode(
+                MeetingParticipantRecord.self,
+                from: Data(String(cString: text).utf8)
+            )
+        }
     }
 
     public func meeting(id: UUID) throws -> MeetingRecord? {
@@ -861,6 +962,14 @@ public actor SQLiteMeetingRepository {
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS participant_profiles (
+                id TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                role TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS meetings (
                 id TEXT PRIMARY KEY,
                 project_id TEXT NOT NULL REFERENCES projects(id),
@@ -869,6 +978,14 @@ public actor SQLiteMeetingRepository {
                 ended_at TEXT,
                 status TEXT NOT NULL,
                 codex_fast_thread_id TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS meeting_participants (
+                meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+                participant_id TEXT NOT NULL REFERENCES participant_profiles(id),
+                payload TEXT NOT NULL,
+                assigned_at TEXT NOT NULL,
+                PRIMARY KEY (meeting_id, participant_id)
             );
 
             CREATE TABLE IF NOT EXISTS transcript_segments (

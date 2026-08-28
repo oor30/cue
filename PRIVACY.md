@@ -11,6 +11,7 @@ Cueはローカルファーストで動作し、会議データを利用者のMa
 - Meeting State、検出イベント、助言カードと根拠
 - Meeting Review、診断レポート
 - AIが生成した会議要約と、その根拠となる発言ID
+- 参加者マスター、プロジェクトとの関連、会議ごとの参加者名簿
 - 利用者が承認前に確認する資料差分案とBacklog下書き
 
 保存先は`~/Library/Application Support/Cue/`です。

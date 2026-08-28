@@ -19,6 +19,7 @@ Cueは、macOS上の会議をリアルタイムに文字起こしし、プロジ
 - プロジェクト資料、ソースコード、Git履歴、過去会議の参照
 - SQLite/WALへの会議・文字起こし・状態・助言のローカル保存
 - プロジェクト別の全会議一覧、会議・プロジェクトのアーカイブと復元
+- 共通／複数プロジェクト／プロジェクト専用の参加者マスターと会議名簿
 - AI会議要約、根拠発言への移動、Meeting Review、全文検索、Markdown書き出し
 - メニューバー、右側パネル、変更可能なグローバルショートカット（停止・再開は既定`⌥P`）
 - 診断レポートと長時間品質ゲート
@@ -103,7 +104,7 @@ Zoom検知は自動録音を開始しません。検知後に利用者が「開�
 
 ## ロードマップ
 
-参加者マスター、話者分離・声紋照合、Zoom RTMS連携を順次進めます。詳細は[ROADMAP.md](ROADMAP.md)にまとめています。
+話者分離・声紋照合、Zoom RTMS連携を順次進めます。詳細は[ROADMAP.md](ROADMAP.md)にまとめています。
 
 ## 設計資料
 
@@ -111,6 +112,7 @@ Zoom検知は自動録音を開始しません。検知後に利用者が「開�
 - [開発指示書](docs/cue-development-instructions.md)
 - [Phase 1品質ゲート](docs/phase1-quality-gate-report.md)
 - [Phase 2優先順位](docs/phase2-competitive-review-and-priorities.md)
+- [話者分離・声紋照合の設計方針](docs/speaker-diarization-design.md)
 
 ## ライセンス
 
