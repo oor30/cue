@@ -270,6 +270,8 @@ private struct MeetingReviewView: View {
                     reviewMetric("リスク", review.risks.count, color: .orange)
                 }
 
+                MeetingAISummarySection(model: model)
+
                 reviewSection("決定事項", values: review.decisions, symbol: "checkmark.seal")
                 reviewSection("TODO・宿題", values: review.actionItems, symbol: "checklist")
                 reviewSection("クライアント要望", values: review.requirements, symbol: "wrench.and.screwdriver")
@@ -390,6 +392,66 @@ private struct MeetingReviewView: View {
     }
 }
 
+private struct MeetingAISummarySection: View {
+    @Bindable var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label("AI会議要約", systemImage: "sparkles")
+                    .font(.title3.bold())
+                Spacer()
+                if model.isGeneratingMeetingSummary {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+                Button(model.meetingAISummary == nil ? "生成" : "再生成") {
+                    Task { await model.generateMeetingSummary() }
+                }
+                .disabled(model.isGeneratingMeetingSummary)
+            }
+
+            if let summary = model.meetingAISummary {
+                Text(rendered(summary.markdown))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                HStack {
+                    Text("\(summary.provider.displayName) · \(summary.generatedAt.formatted())")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                if !summary.evidence.isEmpty {
+                    DisclosureGroup("要約の根拠（\(summary.evidence.count)件）") {
+                        EvidenceListView(
+                            evidence: summary.evidence,
+                            onOpen: model.openEvidence,
+                            onCopy: model.copyEvidence
+                        )
+                        .padding(.top, 6)
+                    }
+                }
+            } else {
+                Text("文字起こし全体をAIが統合し、概要・決定・要件・TODO・未回答事項・リスクに整理します。")
+                    .foregroundStyle(.secondary)
+            }
+
+            if let status = model.meetingSummaryStatus {
+                Text(status)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(14)
+        .background(.quinary, in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func rendered(_ markdown: String) -> AttributedString {
+        (try? AttributedString(markdown: markdown)) ?? AttributedString(markdown)
+    }
+}
+
 private struct DiagnosticsReviewSection: View {
     let report: MeetingDiagnosticsReport
 
@@ -433,26 +495,54 @@ private struct ProjectSidebar: View {
     var body: some View {
         List(selection: $model.selectedProjectID) {
             Section("プロジェクト") {
-                ForEach(model.projects) { project in
+                ForEach(model.visibleProjects) { project in
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(project.name)
-                            .font(.headline)
+                        HStack {
+                            Text(project.name)
+                                .font(.headline)
+                            if project.archivedAt != nil {
+                                Text("アーカイブ")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
                         Text(project.rootPath)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
                     .tag(project.id)
+                    .contextMenu {
+                        Button(project.archivedAt == nil ? "アーカイブ" : "復元") {
+                            Task {
+                                await model.setProjectArchived(
+                                    project,
+                                    archived: project.archivedAt == nil
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
         .safeAreaInset(edge: .bottom) {
-            Button {
-                Task { await model.addProject() }
-            } label: {
-                Label("プロジェクトを追加", systemImage: "plus")
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle(
+                    "アーカイブを表示",
+                    isOn: Binding(
+                        get: { model.showArchivedProjects },
+                        set: { model.setShowArchivedProjects($0) }
+                    )
+                )
+                    .font(.caption)
+                    .toggleStyle(.switch)
+                Button {
+                    Task { await model.addProject() }
+                } label: {
+                    Label("プロジェクトを追加", systemImage: "plus")
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
             .padding()
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(.bar)
@@ -505,7 +595,11 @@ private struct StartMeetingView: View {
                         .padding(.vertical, 8)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(model.selectedProject == nil || model.isBusy)
+                .disabled(
+                    model.selectedProject == nil ||
+                        model.selectedProject?.archivedAt != nil ||
+                        model.isBusy
+                )
 
                 if let detection = model.pendingMeetingDetection {
                     VStack(spacing: 8) {
@@ -567,6 +661,83 @@ private struct ProjectHistoryPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Label("Meeting Library", systemImage: "tray.full")
+                    .font(.headline)
+                Text(model.projectMeetingStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Toggle("アーカイブ", isOn: $model.showArchivedMeetings)
+                    .font(.caption)
+                    .toggleStyle(.switch)
+            }
+
+            if model.visibleProjectMeetings.isEmpty {
+                Text(
+                    model.showArchivedMeetings
+                        ? "表示できる会議記録はありません"
+                        : "通常表示の会議記録はありません"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 7) {
+                        ForEach(model.visibleProjectMeetings) { meeting in
+                            HStack(spacing: 8) {
+                                Button {
+                                    Task { await model.openPastMeeting(meetingID: meeting.id) }
+                                } label: {
+                                    HStack(alignment: .top, spacing: 9) {
+                                        Image(systemName: meeting.archivedAt == nil
+                                            ? "doc.text"
+                                            : "archivebox")
+                                            .foregroundStyle(
+                                                meeting.archivedAt == nil
+                                                    ? Color.accentColor
+                                                    : Color.secondary
+                                            )
+                                            .frame(width: 18)
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text(meeting.title)
+                                                .foregroundStyle(.primary)
+                                                .lineLimit(1)
+                                            Text(meetingMetadata(meeting))
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        Spacer()
+                                    }
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(meeting.endedAt == nil)
+
+                                Menu {
+                                    Button(meeting.archivedAt == nil ? "アーカイブ" : "復元") {
+                                        Task {
+                                            await model.setMeetingArchived(
+                                                meeting,
+                                                archived: meeting.archivedAt == nil
+                                            )
+                                        }
+                                    }
+                                } label: {
+                                    Image(systemName: "ellipsis.circle")
+                                }
+                                .menuStyle(.borderlessButton)
+                            }
+                            .padding(9)
+                            .background(.quinary, in: RoundedRectangle(cornerRadius: 8))
+                        }
+                    }
+                }
+                .frame(maxHeight: 260)
+            }
+
+            Divider()
+
             HStack {
                 Label("Project Brief", systemImage: "clock.arrow.circlepath")
                     .font(.headline)
@@ -692,6 +863,19 @@ private struct ProjectHistoryPanel: View {
     private func formatMeetingTime(_ seconds: TimeInterval) -> String {
         let total = max(0, Int(seconds))
         return String(format: "%02d:%02d", total / 60, total % 60)
+    }
+
+    private func meetingMetadata(_ meeting: MeetingRecord) -> String {
+        let started = meeting.startedAt.formatted(
+            date: .abbreviated,
+            time: .shortened
+        )
+        guard let endedAt = meeting.endedAt else {
+            return "\(started) · 未完了"
+        }
+        let minutes = max(0, Int(endedAt.timeIntervalSince(meeting.startedAt) / 60))
+        let archive = meeting.archivedAt == nil ? "" : " · アーカイブ済み"
+        return "\(started) · \(minutes)分\(archive)"
     }
 }
 

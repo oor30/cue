@@ -13,7 +13,10 @@ struct MenuBarContent: View {
             Button("会議を開始") {
                 Task { await model.startMeeting() }
             }
-            .disabled(model.selectedProject == nil)
+            .disabled(
+                model.selectedProject == nil ||
+                    model.selectedProject?.archivedAt != nil
+            )
         } else {
             Text(model.captureState.label)
             Button(

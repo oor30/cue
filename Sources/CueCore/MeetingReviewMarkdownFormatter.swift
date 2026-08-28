@@ -4,6 +4,7 @@ public enum MeetingReviewMarkdownFormatter {
     public static func render(
         review: MeetingReviewSnapshot,
         cards: [SuggestionCard] = [],
+        aiSummary: MeetingAISummary? = nil,
         diagnostics: MeetingDiagnosticsReport? = nil,
         backlogDrafts: [BacklogIssueDraft] = [],
         documentChangeProposals: [DocumentChangeProposal] = []
@@ -16,6 +17,20 @@ public enum MeetingReviewMarkdownFormatter {
             "- 所要時間: \(duration(review.endedAt.timeIntervalSince(review.startedAt)))",
             ""
         ]
+
+        lines.append("## AI会議要約")
+        lines.append("")
+        if let aiSummary {
+            lines.append(aiSummary.markdown)
+            lines.append("")
+            for evidence in aiSummary.evidence {
+                let location = evidence.location.map { " — \($0)" } ?? ""
+                lines.append("- 根拠: \(singleLine(evidence.label))\(location)")
+            }
+        } else {
+            lines.append("- 未生成")
+        }
+        lines.append("")
 
         appendSection("決定事項", values: review.decisions, to: &lines)
         appendSection("TODO・宿題", values: review.actionItems, to: &lines)

@@ -1,6 +1,6 @@
 import Foundation
 
-public enum AIProviderKind: String, Codable, CaseIterable, Sendable {
+public enum AIProviderKind: String, Codable, CaseIterable, Hashable, Sendable {
     case codex
     case claudeCode
 
@@ -43,6 +43,7 @@ public struct ProjectConfiguration: Identifiable, Codable, Hashable, Sendable {
     public var meetingPrompt: String
     public var backlogConfiguration: BacklogConfiguration?
     public var participantNames: [String]
+    public var archivedAt: Date?
 
     public init(
         id: UUID = UUID(),
@@ -58,7 +59,8 @@ public struct ProjectConfiguration: Identifiable, Codable, Hashable, Sendable {
         projectPrompt: String = "",
         meetingPrompt: String = "",
         backlogConfiguration: BacklogConfiguration? = nil,
-        participantNames: [String] = []
+        participantNames: [String] = [],
+        archivedAt: Date? = nil
     ) {
         self.id = id
         self.name = name
@@ -74,6 +76,7 @@ public struct ProjectConfiguration: Identifiable, Codable, Hashable, Sendable {
         self.meetingPrompt = meetingPrompt
         self.backlogConfiguration = backlogConfiguration
         self.participantNames = participantNames
+        self.archivedAt = archivedAt
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -81,6 +84,7 @@ public struct ProjectConfiguration: Identifiable, Codable, Hashable, Sendable {
         case priorityFiles, provider, profile, webSearchEnabled
         case customProfilePrompt, projectPrompt, meetingPrompt, backlogConfiguration
         case participantNames
+        case archivedAt
     }
 
     public init(from decoder: any Decoder) throws {
@@ -132,6 +136,7 @@ public struct ProjectConfiguration: Identifiable, Codable, Hashable, Sendable {
             [String].self,
             forKey: .participantNames
         ) ?? []
+        archivedAt = try container.decodeIfPresent(Date.self, forKey: .archivedAt)
     }
 }
 
@@ -152,6 +157,7 @@ public struct MeetingRecord: Identifiable, Codable, Hashable, Sendable {
     public var endedAt: Date?
     public var status: MeetingStatus
     public var codexFastThreadID: String?
+    public var archivedAt: Date?
 
     public init(
         id: UUID = UUID(),
@@ -160,7 +166,8 @@ public struct MeetingRecord: Identifiable, Codable, Hashable, Sendable {
         startedAt: Date = Date(),
         endedAt: Date? = nil,
         status: MeetingStatus = .preparing,
-        codexFastThreadID: String? = nil
+        codexFastThreadID: String? = nil,
+        archivedAt: Date? = nil
     ) {
         self.id = id
         self.projectID = projectID
@@ -169,6 +176,7 @@ public struct MeetingRecord: Identifiable, Codable, Hashable, Sendable {
         self.endedAt = endedAt
         self.status = status
         self.codexFastThreadID = codexFastThreadID
+        self.archivedAt = archivedAt
     }
 }
 
@@ -678,5 +686,30 @@ public struct MeetingReviewSnapshot: Identifiable, Codable, Sendable {
         self.requirements = requirements
         self.actionItems = actionItems
         self.risks = risks
+    }
+}
+
+public struct MeetingAISummary: Identifiable, Codable, Hashable, Sendable {
+    public let id: UUID
+    public let meetingID: UUID
+    public let markdown: String
+    public let evidence: [EvidenceReference]
+    public let provider: AIProviderKind
+    public let generatedAt: Date
+
+    public init(
+        id: UUID = UUID(),
+        meetingID: UUID,
+        markdown: String,
+        evidence: [EvidenceReference],
+        provider: AIProviderKind,
+        generatedAt: Date = Date()
+    ) {
+        self.id = id
+        self.meetingID = meetingID
+        self.markdown = markdown
+        self.evidence = evidence
+        self.provider = provider
+        self.generatedAt = generatedAt
     }
 }

@@ -216,14 +216,28 @@ actor CodexProvider: AIProvider {
               Project調査は回答に不可欠な場合だけ最小限にしてください。
               """
 
+        let isMeetingSummary = request.context.sourceEvent.triggerReason ==
+            "手動操作: 会議全体のAI要約"
+        let taskInstructions = isMeetingSummary
+            ? """
+              Meeting Context JSONのrecentTranscript全体とstateを読み、単なる抜粋や発言の連結ではなく、会議後に読み返せるAI要約を1件作成してください。
+              titleは「AI会議要約」、categoryはresearchにしてください。
+              bodyは日本語Markdownで「概要」「決定事項」「要望・要件」「TODO・担当」「未回答・確認事項」「リスク」の見出しをこの順に含め、各項目を簡潔に統合してください。
+              存在しない担当者、期限、決定を補完しないでください。該当情報がない見出しには「なし」と書いてください。
+              重要な主張の根拠となる発言をevidenceへ含め、locationにはrecentTranscript内に実在するsegment IDを指定してください。
+              """
+            : """
+              次の会議イベントについて、今すぐ役立つ短い助言カードを1件だけ作成してください。
+              triggerReasonが「手動操作:」で始まる場合は、その操作内容を最優先してください。
+              本文は日本語で4行以内にしてください。
+              """
+
         return """
         あなたはリアルタイムのCueです。セッションで指定されたProfileの役割と重点に従ってください。
         ファイル変更、コミット、外部への書き込みは一切行わないでください。
-        次の会議イベントについて、今すぐ役立つ短い助言カードを1件だけ作成してください。
-        triggerReasonが「手動操作:」で始まる場合は、その操作内容を最優先してください。
+        \(taskInstructions)
         deepモードではProject Root内の資料・ソース・Git履歴を読み取り調査し、根拠を付けてください。
         根拠が不足する場合は断定せず、確認すべき質問を提示してください。
-        本文は日本語で4行以内にしてください。
         Meeting Context JSONのprojectBriefは同一Projectの過去会議から抽出した最大5件の参考情報です。
         過去の決定を現在も有効と断定せず、現在の発言と不一致なら仕様変更または確認事項として提示してください。
 

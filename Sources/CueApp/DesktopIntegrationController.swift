@@ -490,7 +490,11 @@ private struct MeetingDetectionPromptView: View {
                     Task { await model.confirmMeetingDetection() }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(model.selectedProject == nil || model.activeMeeting != nil)
+                .disabled(
+                    model.selectedProject == nil ||
+                        model.selectedProject?.archivedAt != nil ||
+                        model.activeMeeting != nil
+                )
             }
         }
         .padding(18)

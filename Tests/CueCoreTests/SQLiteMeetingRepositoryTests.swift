@@ -3,6 +3,60 @@ import Testing
 @testable import CueCore
 
 struct SQLiteMeetingRepositoryTests {
+    @Test func archivesAndRestoresProjectsAndMeetings() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "CueArchiveTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let repository = try SQLiteMeetingRepository(
+            databaseURL: directory.appending(path: "test.sqlite")
+        )
+        var project = ProjectConfiguration(name: "Archive", rootPath: directory.path)
+        project.archivedAt = Date(timeIntervalSince1970: 900)
+        try await repository.saveProject(project)
+        #expect(try await repository.listProjects() == [project])
+
+        project.archivedAt = nil
+        try await repository.saveProject(project)
+        let meeting = MeetingRecord(
+            projectID: project.id,
+            title: "Archive Meeting",
+            startedAt: Date(timeIntervalSince1970: 1_000),
+            endedAt: Date(timeIntervalSince1970: 1_100),
+            status: .reviewing
+        )
+        try await repository.createMeeting(meeting)
+        try await repository.upsertTranscript(
+            TranscriptSegment(
+                meetingID: meeting.id,
+                source: .system,
+                speaker: .other,
+                startTime: 0,
+                endTime: 1,
+                text: "アーカイブ検索テスト",
+                isFinal: true
+            )
+        )
+
+        let archivedAt = Date(timeIntervalSince1970: 1_200)
+        try await repository.setMeetingArchived(id: meeting.id, archivedAt: archivedAt)
+        #expect(try await repository.meeting(id: meeting.id)?.archivedAt == archivedAt)
+        #expect(
+            try await repository.searchTranscripts(
+                projectID: project.id,
+                query: "アーカイブ検索テスト"
+            ).isEmpty
+        )
+
+        try await repository.setMeetingArchived(id: meeting.id, archivedAt: nil)
+        #expect(try await repository.meeting(id: meeting.id)?.archivedAt == nil)
+        #expect(
+            try await repository.searchTranscripts(
+                projectID: project.id,
+                query: "アーカイブ検索テスト"
+            ).count == 1
+        )
+    }
+
     @Test func persistsProjectMeetingAndTranscript() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appending(path: "CueTests-\(UUID().uuidString)")
@@ -41,6 +95,22 @@ struct SQLiteMeetingRepositoryTests {
             isFinal: true
         )
         try await repository.upsertTranscript(segment)
+
+        let summary = MeetingAISummary(
+            meetingID: meeting.id,
+            markdown: "## 概要\n仕様を確定した。",
+            evidence: [
+                EvidenceReference(
+                    kind: .transcript,
+                    label: "決定の発言",
+                    location: segment.id.uuidString,
+                    checkedAt: Date(timeIntervalSince1970: 1_025)
+                )
+            ],
+            provider: .codex,
+            generatedAt: Date(timeIntervalSince1970: 1_030)
+        )
+        try await repository.saveMeetingSummary(summary)
 
         let diagnostics = MeetingDiagnosticsReport(
             meetingID: meeting.id,
@@ -81,6 +151,7 @@ struct SQLiteMeetingRepositoryTests {
         let storedDiagnostics = try await repository.diagnostics(meetingID: meeting.id)
         let analyses = try await repository.analysisRecords(meetingID: meeting.id)
         let pauseIntervals = try await repository.pauseIntervals(meetingID: meeting.id)
+        let storedSummary = try await repository.meetingSummary(meetingID: meeting.id)
 
         #expect(projects == [project])
         #expect(segments.count == 1)
@@ -90,6 +161,7 @@ struct SQLiteMeetingRepositoryTests {
         #expect(storedDiagnostics == diagnostics)
         #expect(analyses == [analysis])
         #expect(pauseIntervals == [pauseInterval])
+        #expect(storedSummary == summary)
     }
 
     @Test func reopensReadsBackAndCascadeDeletesLargeMeeting() async throws {
@@ -157,6 +229,14 @@ struct SQLiteMeetingRepositoryTests {
                     )
                 )
             }
+            try await repository.saveMeetingSummary(
+                MeetingAISummary(
+                    meetingID: meeting.id,
+                    markdown: "## 概要\n長時間会議の要約",
+                    evidence: [],
+                    provider: .codex
+                )
+            )
             meeting.endedAt = Date(timeIntervalSince1970: 2_600)
             meeting.status = .reviewing
             try await repository.updateMeeting(meeting)
@@ -169,6 +249,8 @@ struct SQLiteMeetingRepositoryTests {
         #expect(try await reopened.events(meetingID: meeting.id) == [event])
         #expect(try await reopened.cards(meetingID: meeting.id) == [card])
         #expect(try await reopened.recentSegments(meetingID: meeting.id, limit: 1_000).count == 500)
+        #expect(try await reopened.finalSegments(meetingID: meeting.id).count == 500)
+        #expect(try await reopened.meetingSummary(meetingID: meeting.id) != nil)
 
         try await reopened.deleteMeeting(id: meeting.id)
         #expect(try await reopened.meeting(id: meeting.id) == nil)
@@ -176,8 +258,10 @@ struct SQLiteMeetingRepositoryTests {
         #expect(try await reopened.events(meetingID: meeting.id).isEmpty)
         #expect(try await reopened.cards(meetingID: meeting.id).isEmpty)
         #expect(try await reopened.recentSegments(meetingID: meeting.id).isEmpty)
+        #expect(try await reopened.finalSegments(meetingID: meeting.id).isEmpty)
         #expect(try await reopened.analysisRecords(meetingID: meeting.id).isEmpty)
         #expect(try await reopened.diagnostics(meetingID: meeting.id) == nil)
         #expect(try await reopened.pauseIntervals(meetingID: meeting.id).isEmpty)
+        #expect(try await reopened.meetingSummary(meetingID: meeting.id) == nil)
     }
 }

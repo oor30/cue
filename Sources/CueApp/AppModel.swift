@@ -15,9 +15,16 @@ final class AppModel {
     var meetingState: MeetingState?
     var lastReview: MeetingReviewSnapshot?
     var lastDiagnostics: MeetingDiagnosticsReport?
+    var meetingAISummary: MeetingAISummary?
+    var meetingSummaryStatus: String?
+    var isGeneratingMeetingSummary = false
     var reviewFocusSegmentID: UUID?
     var projectBriefItems: [ProjectBriefItem] = []
     var projectBriefStatus = "過去会議を読み込んでいます"
+    var projectMeetings: [MeetingRecord] = []
+    var projectMeetingStatus = "会議記録を読み込んでいます"
+    var showArchivedProjects = false
+    var showArchivedMeetings = false
     var pastMeetingSearchQuery = ""
     var pastMeetingSearchResults: [ProjectTranscriptSearchHit] = []
     var pastMeetingSearchStatus: String?
@@ -79,12 +86,21 @@ final class AppModel {
     private var fastAnalysisWorker: Task<Void, Never>?
     private var deepAnalysisWorker: Task<Void, Never>?
     private var activePauseInterval: MeetingPauseInterval?
+    private var meetingSummaryAnalysisID: UUID?
     private let maximumQueuedFastAnalyses = 2
     private let maximumFastQueueWait: TimeInterval = 20
 
     var selectedProject: ProjectConfiguration? {
         guard let selectedProjectID else { return nil }
         return projects.first { $0.id == selectedProjectID }
+    }
+
+    var visibleProjects: [ProjectConfiguration] {
+        projects.filter { showArchivedProjects || $0.archivedAt == nil }
+    }
+
+    var visibleProjectMeetings: [MeetingRecord] {
+        projectMeetings.filter { showArchivedMeetings || $0.archivedAt == nil }
     }
 
     var selectedProviderDisplayName: String {
@@ -225,11 +241,56 @@ final class AppModel {
         }
     }
 
+    func setShowArchivedProjects(_ show: Bool) {
+        showArchivedProjects = show
+        if !show,
+           selectedProject?.archivedAt != nil {
+            selectedProjectID = projects.first(where: { $0.archivedAt == nil })?.id
+        }
+    }
+
+    func setProjectArchived(_ project: ProjectConfiguration, archived: Bool) async {
+        guard activeMeeting == nil,
+              let index = projects.firstIndex(where: { $0.id == project.id })
+        else { return }
+        projects[index].archivedAt = archived ? Date() : nil
+        do {
+            try await repository?.saveProject(projects[index])
+            if archived,
+               selectedProjectID == project.id,
+               !showArchivedProjects {
+                selectedProjectID = projects.first(where: { $0.archivedAt == nil })?.id
+            }
+            await refreshProjectBrief()
+        } catch {
+            startupError = "プロジェクトのアーカイブ状態を保存できませんでした。\n\(error.localizedDescription)"
+        }
+    }
+
+    func setMeetingArchived(_ meeting: MeetingRecord, archived: Bool) async {
+        guard activeMeeting == nil else { return }
+        let archivedAt = archived ? Date() : nil
+        do {
+            try await repository?.setMeetingArchived(
+                id: meeting.id,
+                archivedAt: archivedAt
+            )
+            if let index = projectMeetings.firstIndex(where: { $0.id == meeting.id }) {
+                projectMeetings[index].archivedAt = archivedAt
+            }
+            await refreshProjectBrief()
+        } catch {
+            startupError = "会議のアーカイブ状態を保存できませんでした。\n\(error.localizedDescription)"
+        }
+    }
+
     func refreshProjectBrief() async {
         guard activeMeeting == nil, let project = selectedProject else {
             if selectedProject == nil {
                 projectBriefItems = []
                 projectBriefStatus = "Project Rootを選択してください"
+                projectMeetings = []
+                projectMeetingStatus = "Project Rootを選択してください"
                 projectBriefProjectID = nil
             }
             return
@@ -239,10 +300,17 @@ final class AppModel {
             pastMeetingSearchQuery = ""
             pastMeetingSearchResults = []
             pastMeetingSearchStatus = nil
+            showArchivedMeetings = false
         }
         projectBriefProjectID = project.id
         projectBriefStatus = "過去会議を読み込んでいます"
         do {
+            projectMeetings = try await repository?.meetings(
+                projectID: project.id
+            ) ?? []
+            projectMeetingStatus = projectMeetings.isEmpty
+                ? "このプロジェクトの会議記録はまだありません"
+                : "\(projectMeetings.count)件の会議記録"
             projectBriefItems = try await repository?.projectBrief(
                 projectID: project.id,
                 limit: 5
@@ -252,7 +320,9 @@ final class AppModel {
                 : "直近会議から重要項目を5件まで表示"
         } catch {
             projectBriefItems = []
+            projectMeetings = []
             projectBriefStatus = "過去会議を読み込めませんでした"
+            projectMeetingStatus = "会議記録を読み込めませんでした"
             startupError = error.localizedDescription
         }
     }
@@ -304,9 +374,8 @@ final class AppModel {
             }
             let state = try await repository?.latestState(meetingID: meetingID)
                 ?? MeetingState(meetingID: meetingID)
-            let finalTranscript = try await repository?.recentSegments(
-                meetingID: meetingID,
-                limit: 5_000
+            let finalTranscript = try await repository?.finalSegments(
+                meetingID: meetingID
             ) ?? []
             transcript = finalTranscript
             cards = try await repository?.cards(meetingID: meetingID) ?? []
@@ -321,6 +390,10 @@ final class AppModel {
                 uniquingKeysWith: { _, latest in latest }
             )
             lastDiagnostics = try await repository?.diagnostics(meetingID: meetingID)
+            meetingAISummary = try await repository?.meetingSummary(meetingID: meetingID)
+            meetingSummaryStatus = meetingAISummary == nil
+                ? "AI要約はまだありません"
+                : nil
             reviewFocusSegmentID = focusSegmentID
             lastReview = MeetingReviewSnapshot(
                 meetingID: meeting.id,
@@ -347,6 +420,106 @@ final class AppModel {
                 .first
         } catch {
             startupError = "過去会議を読み込めませんでした。\n\(error.localizedDescription)"
+        }
+    }
+
+    func generateMeetingSummary() async {
+        guard let review = lastReview,
+              !isGeneratingMeetingSummary
+        else { return }
+        guard !review.finalTranscript.isEmpty else {
+            meetingSummaryStatus = "要約できる確定済み文字起こしがありません"
+            return
+        }
+
+        isGeneratingMeetingSummary = true
+        meetingSummaryStatus = "AIが会議全体を要約しています"
+        let analysisID = UUID()
+        meetingSummaryAnalysisID = analysisID
+        defer {
+            if meetingSummaryAnalysisID == analysisID {
+                meetingSummaryAnalysisID = nil
+                isGeneratingMeetingSummary = false
+            }
+        }
+
+        var session: AISessionHandle?
+        do {
+            guard let meeting = try await repository?.meeting(id: review.meetingID),
+                  let project = projects.first(where: { $0.id == meeting.projectID })
+            else {
+                meetingSummaryStatus = "会議のプロジェクト設定を読み込めませんでした"
+                return
+            }
+            let state = try await repository?.latestState(meetingID: meeting.id)
+                ?? MeetingState(meetingID: meeting.id)
+            let event = DetectedEvent(
+                meetingID: meeting.id,
+                topicID: state.topic.id,
+                topicRevision: state.topic.revision,
+                type: .importantFact,
+                sourceSegmentIDs: review.finalTranscript.map(\.id),
+                triggerReason: "手動操作: 会議全体のAI要約",
+                excerpt: review.title,
+                localScore: 1
+            )
+            let context = MeetingContextEnvelope(
+                meetingID: meeting.id,
+                topic: state.topic,
+                state: state,
+                recentTranscript: review.finalTranscript,
+                sourceEvent: event,
+                relatedEvidence: [],
+                projectSearchPolicy: ProjectSearchPolicy(project: project),
+                projectBrief: projectBriefItems
+            )
+            let request = AnalysisRequest(
+                id: analysisID,
+                mode: .fast,
+                context: context,
+                deadline: .seconds(120)
+            )
+
+            let startedSession = try await codexProvider.startSession(project: project)
+            session = startedSession
+            let progress = await codexProvider.analyze(
+                request: request,
+                in: startedSession
+            )
+            var completedCard: SuggestionCard?
+            for try await update in progress {
+                switch update {
+                case .started:
+                    meetingSummaryStatus = "AI要約を生成しています"
+                case .message(let message):
+                    meetingSummaryStatus = message
+                case .completed(let card):
+                    completedCard = card
+                }
+            }
+            guard let completedCard else {
+                throw CodexBridgeError.missingAgentMessage
+            }
+            let summary = MeetingAISummary(
+                meetingID: meeting.id,
+                markdown: completedCard.body,
+                evidence: completedCard.evidence,
+                provider: project.provider
+            )
+            try await repository?.saveMeetingSummary(summary)
+            if lastReview?.meetingID == meeting.id {
+                meetingAISummary = summary
+                meetingSummaryStatus = nil
+            }
+            await codexProvider.endSession(startedSession)
+            session = nil
+        } catch {
+            if let session {
+                await codexProvider.endSession(session)
+            }
+            if lastReview?.meetingID == review.meetingID {
+                meetingSummaryStatus = "AI要約を生成できませんでした: \(error.localizedDescription)"
+            }
         }
     }
 
@@ -420,6 +593,10 @@ final class AppModel {
 
     func startMeeting(suggestedTitle: String? = nil) async {
         guard let project = selectedProject, activeMeeting == nil else { return }
+        guard project.archivedAt == nil else {
+            startupError = "アーカイブしたプロジェクトを復元してから会議を開始してください。"
+            return
+        }
         isBusy = true
         defer { isBusy = false }
 
@@ -472,6 +649,9 @@ final class AppModel {
         )
         lastReview = nil
         lastDiagnostics = nil
+        meetingAISummary = nil
+        meetingSummaryStatus = nil
+        isGeneratingMeetingSummary = false
         reviewFocusSegmentID = nil
         meetingState = MeetingState(meetingID: meeting.id)
         transcript = []
@@ -686,13 +866,23 @@ final class AppModel {
         } catch {
             startupError = error.localizedDescription
         }
+        let finalTranscript: [TranscriptSegment]
+        do {
+            finalTranscript = try await repository?.finalSegments(
+                meetingID: meeting.id
+            ) ?? transcript.filter(\.isFinal)
+        } catch {
+            finalTranscript = transcript.filter(\.isFinal)
+            startupError = "保存済み文字起こしの再読込に失敗しました。\n\(error.localizedDescription)"
+        }
+        transcript = finalTranscript
         if let state = meetingState {
             lastReview = MeetingReviewSnapshot(
                 meetingID: meeting.id,
                 title: meeting.title,
                 startedAt: meeting.startedAt,
                 endedAt: endedAt,
-                finalTranscript: transcript.filter(\.isFinal),
+                finalTranscript: finalTranscript,
                 decisions: state.decisions,
                 questions: state.questions,
                 requirements: state.requirements,
@@ -718,6 +908,11 @@ final class AppModel {
             self.diagnosticsCollector = nil
         }
         activeMeeting = nil
+        if lastReview != nil {
+            Task { [weak self] in
+                await self?.generateMeetingSummary()
+            }
+        }
     }
 
     func selectCaptureTarget() {
@@ -826,8 +1021,17 @@ final class AppModel {
     }
 
     func closeReview() {
+        if let meetingSummaryAnalysisID {
+            Task { [codexProvider] in
+                await codexProvider.cancel(analysisID: meetingSummaryAnalysisID)
+            }
+            self.meetingSummaryAnalysisID = nil
+        }
         lastReview = nil
         lastDiagnostics = nil
+        meetingAISummary = nil
+        meetingSummaryStatus = nil
+        isGeneratingMeetingSummary = false
         reviewFocusSegmentID = nil
         transcript = []
         cards = []
@@ -863,6 +1067,7 @@ final class AppModel {
         let markdown = MeetingReviewMarkdownFormatter.render(
             review: review,
             cards: cards,
+            aiSummary: meetingAISummary,
             diagnostics: lastDiagnostics,
             backlogDrafts: backlogDrafts,
             documentChangeProposals: documentChangeProposal.map { [$0] } ?? []
@@ -1176,7 +1381,8 @@ final class AppModel {
     private func loadProjects() async {
         do {
             projects = try await repository?.listProjects() ?? []
-            selectedProjectID = projects.first?.id
+            selectedProjectID = projects.first(where: { $0.archivedAt == nil })?.id
+                ?? projects.first?.id
         } catch {
             startupError = error.localizedDescription
         }

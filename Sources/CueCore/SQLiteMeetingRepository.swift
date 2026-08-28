@@ -125,8 +125,11 @@ public actor SQLiteMeetingRepository {
     public func meeting(id: UUID) throws -> MeetingRecord? {
         try query(
             """
-            SELECT project_id, title, started_at, ended_at, status, codex_fast_thread_id
-            FROM meetings WHERE id = ? LIMIT 1;
+            SELECT m.project_id, m.title, m.started_at, m.ended_at, m.status,
+                   m.codex_fast_thread_id, a.archived_at
+            FROM meetings AS m
+            LEFT JOIN meeting_archives AS a ON a.meeting_id = m.id
+            WHERE m.id = ? LIMIT 1;
             """,
             bindings: [id.uuidString]
         ) { statement in
@@ -145,6 +148,9 @@ public actor SQLiteMeetingRepository {
             let codexThreadID = sqlite3_column_text(statement, 5).map {
                 String(cString: $0)
             }
+            let archivedAt = sqlite3_column_text(statement, 6).flatMap {
+                Self.date(String(cString: $0))
+            }
             return MeetingRecord(
                 id: id,
                 projectID: projectID,
@@ -152,7 +158,8 @@ public actor SQLiteMeetingRepository {
                 startedAt: startedAt,
                 endedAt: endedAt,
                 status: status,
-                codexFastThreadID: codexThreadID
+                codexFastThreadID: codexThreadID,
+                archivedAt: archivedAt
             )
         }.first
     }
@@ -184,6 +191,25 @@ public actor SQLiteMeetingRepository {
 
     public func deleteMeeting(id: UUID) throws {
         try execute("DELETE FROM meetings WHERE id = ?;", bindings: [id.uuidString])
+    }
+
+    public func setMeetingArchived(id: UUID, archivedAt: Date?) throws {
+        if let archivedAt {
+            try execute(
+                """
+                INSERT INTO meeting_archives (meeting_id, archived_at)
+                VALUES (?, ?)
+                ON CONFLICT(meeting_id) DO UPDATE SET
+                    archived_at = excluded.archived_at;
+                """,
+                bindings: [id.uuidString, Self.timestamp(archivedAt)]
+            )
+        } else {
+            try execute(
+                "DELETE FROM meeting_archives WHERE meeting_id = ?;",
+                bindings: [id.uuidString]
+            )
+        }
     }
 
     public func savePauseInterval(_ interval: MeetingPauseInterval) throws {
@@ -229,6 +255,40 @@ public actor SQLiteMeetingRepository {
                 endedAt: endedAt
             )
         }
+    }
+
+    public func saveMeetingSummary(_ summary: MeetingAISummary) throws {
+        let payload = try String(decoding: encoder.encode(summary), as: UTF8.self)
+        try execute(
+            """
+            INSERT INTO meeting_ai_summaries
+                (meeting_id, payload, generated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(meeting_id) DO UPDATE SET
+                payload = excluded.payload,
+                generated_at = excluded.generated_at;
+            """,
+            bindings: [
+                summary.meetingID.uuidString,
+                payload,
+                Self.timestamp(summary.generatedAt)
+            ]
+        )
+    }
+
+    public func meetingSummary(meetingID: UUID) throws -> MeetingAISummary? {
+        try query(
+            "SELECT payload FROM meeting_ai_summaries WHERE meeting_id = ? LIMIT 1;",
+            bindings: [meetingID.uuidString]
+        ) { statement in
+            guard let text = sqlite3_column_text(statement, 0) else {
+                throw RepositoryError.decode("meeting summary payload is null")
+            }
+            return try decoder.decode(
+                MeetingAISummary.self,
+                from: Data(String(cString: text).utf8)
+            )
+        }.first
     }
 
     public func upsertTranscript(_ segment: TranscriptSegment) throws {
@@ -611,6 +671,25 @@ public actor SQLiteMeetingRepository {
         }.reversed()
     }
 
+    public func finalSegments(meetingID: UUID) throws -> [TranscriptSegment] {
+        try query(
+            """
+            SELECT payload FROM transcript_segments
+            WHERE meeting_id = ? AND is_final = 1
+            ORDER BY start_time ASC;
+            """,
+            bindings: [meetingID.uuidString]
+        ) { statement in
+            guard let text = sqlite3_column_text(statement, 0) else {
+                throw RepositoryError.decode("transcript payload is null")
+            }
+            return try decoder.decode(
+                TranscriptSegment.self,
+                from: Data(String(cString: text).utf8)
+            )
+        }
+    }
+
     public func transcriptSegment(id: UUID) throws -> TranscriptSegment? {
         try query(
             "SELECT payload FROM transcript_segments WHERE id = ? LIMIT 1;",
@@ -633,7 +712,7 @@ public actor SQLiteMeetingRepository {
     ) throws -> [ProjectBriefItem] {
         guard limit > 0 else { return [] }
         let recentMeetings = try meetings(projectID: projectID)
-            .filter { $0.endedAt != nil }
+            .filter { $0.endedAt != nil && $0.archivedAt == nil }
             .prefix(max(1, meetingScanLimit))
 
         var result: [ProjectBriefItem] = []
@@ -730,6 +809,9 @@ public actor SQLiteMeetingRepository {
             JOIN meetings AS m
                 ON m.id = transcript_fts.meeting_id
             WHERE transcript_fts MATCH ? AND m.project_id = ?
+                AND NOT EXISTS (
+                    SELECT 1 FROM meeting_archives AS a WHERE a.meeting_id = m.id
+                )
             ORDER BY bm25(transcript_fts), m.started_at DESC
             LIMIT ?;
             """,
@@ -748,6 +830,9 @@ public actor SQLiteMeetingRepository {
                 FROM transcript_segments AS ts
                 JOIN meetings AS m ON m.id = ts.meeting_id
                 WHERE m.project_id = ?
+                    AND NOT EXISTS (
+                        SELECT 1 FROM meeting_archives AS a WHERE a.meeting_id = m.id
+                    )
                     AND ts.is_final = 1
                     AND ts.text LIKE ? ESCAPE '\\'
                 ORDER BY m.started_at DESC, ts.start_time DESC
@@ -810,6 +895,17 @@ public actor SQLiteMeetingRepository {
 
             CREATE INDEX IF NOT EXISTS idx_pause_interval_meeting_time
                 ON meeting_pause_intervals(meeting_id, started_at);
+
+            CREATE TABLE IF NOT EXISTS meeting_archives (
+                meeting_id TEXT PRIMARY KEY REFERENCES meetings(id) ON DELETE CASCADE,
+                archived_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS meeting_ai_summaries (
+                meeting_id TEXT PRIMARY KEY REFERENCES meetings(id) ON DELETE CASCADE,
+                payload TEXT NOT NULL,
+                generated_at TEXT NOT NULL
+            );
 
             CREATE TABLE IF NOT EXISTS meeting_state_snapshots (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
