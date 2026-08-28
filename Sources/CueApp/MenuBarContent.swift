@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct MenuBarContent: View {
@@ -7,6 +8,7 @@ struct MenuBarContent: View {
     var body: some View {
         Button("Cueを開く") {
             openWindow(id: "main")
+            NSApplication.shared.activate(ignoringOtherApps: true)
         }
         Divider()
         if model.activeMeeting == nil {

@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 @main
@@ -5,17 +6,20 @@ struct CueApp: App {
     @State private var model = AppModel()
 
     var body: some Scene {
+        Window("Cue", id: "main") {
+            ContentView(model: model)
+                .frame(minWidth: 860, minHeight: 620)
+                .onAppear {
+                    NSApplication.shared.activate(ignoringOtherApps: true)
+                }
+        }
+        .defaultSize(width: 1_000, height: 720)
+
         MenuBarExtra {
             MenuBarContent(model: model)
         } label: {
             Label("Cue", systemImage: menuBarIcon)
         }
-
-        Window("Cue", id: "main") {
-            ContentView(model: model)
-                .frame(minWidth: 860, minHeight: 620)
-        }
-        .defaultSize(width: 1_000, height: 720)
 
         Settings {
             SettingsView(model: model)
