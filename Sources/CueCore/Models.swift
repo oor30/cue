@@ -218,6 +218,74 @@ public struct MeetingParticipantRecord: Identifiable, Codable, Hashable, Sendabl
     }
 }
 
+public struct SpeakerClusterRecord: Identifiable, Codable, Hashable, Sendable {
+    public let id: UUID
+    public let meetingID: UUID
+    public let clusterKey: String
+    public var displayLabel: String
+    public var sourceSegmentIDs: [UUID]
+    public var speechDuration: TimeInterval
+    public var qualityScore: Double
+    public var assignedParticipantID: UUID?
+    public var suggestedParticipantID: UUID?
+    public var matchConfidence: Double?
+    public let createdAt: Date
+
+    public init(
+        id: UUID = UUID(),
+        meetingID: UUID,
+        clusterKey: String,
+        displayLabel: String,
+        sourceSegmentIDs: [UUID],
+        speechDuration: TimeInterval,
+        qualityScore: Double,
+        assignedParticipantID: UUID? = nil,
+        suggestedParticipantID: UUID? = nil,
+        matchConfidence: Double? = nil,
+        createdAt: Date = Date()
+    ) {
+        self.id = id
+        self.meetingID = meetingID
+        self.clusterKey = clusterKey
+        self.displayLabel = displayLabel
+        self.sourceSegmentIDs = sourceSegmentIDs
+        self.speechDuration = speechDuration
+        self.qualityScore = qualityScore
+        self.assignedParticipantID = assignedParticipantID
+        self.suggestedParticipantID = suggestedParticipantID
+        self.matchConfidence = matchConfidence
+        self.createdAt = createdAt
+    }
+}
+
+public struct EncryptedVoiceprintRecord: Identifiable, Codable, Hashable, Sendable {
+    public let id: UUID
+    public let participantID: UUID
+    public var encryptedEmbedding: Data
+    public let modelIdentifier: String
+    public var sampleCount: Int
+    public let registeredAt: Date
+    public var updatedAt: Date
+
+    public init(
+        id: UUID = UUID(),
+        participantID: UUID,
+        encryptedEmbedding: Data,
+        modelIdentifier: String,
+        sampleCount: Int,
+        registeredAt: Date = Date(),
+        updatedAt: Date = Date()
+    ) {
+        self.id = id
+        self.participantID = participantID
+        self.encryptedEmbedding = encryptedEmbedding
+        self.modelIdentifier = modelIdentifier
+        self.sampleCount = sampleCount
+        self.registeredAt = registeredAt
+        self.updatedAt = updatedAt
+    }
+}
+
 public enum MeetingStatus: String, Codable, Sendable {
     case preparing
     case active
@@ -299,6 +367,7 @@ public struct TranscriptSegment: Identifiable, Codable, Hashable, Sendable {
     public var isFinal: Bool
     public var revision: Int
     public var confidence: Double?
+    public var speakerClusterID: String?
     public var speakerParticipantID: UUID?
     public var speakerLabel: String?
     public let createdAt: Date
@@ -314,6 +383,7 @@ public struct TranscriptSegment: Identifiable, Codable, Hashable, Sendable {
         isFinal: Bool,
         revision: Int = 0,
         confidence: Double? = nil,
+        speakerClusterID: String? = nil,
         speakerParticipantID: UUID? = nil,
         speakerLabel: String? = nil,
         createdAt: Date = Date()
@@ -328,6 +398,7 @@ public struct TranscriptSegment: Identifiable, Codable, Hashable, Sendable {
         self.isFinal = isFinal
         self.revision = revision
         self.confidence = confidence
+        self.speakerClusterID = speakerClusterID
         self.speakerParticipantID = speakerParticipantID
         self.speakerLabel = speakerLabel
         self.createdAt = createdAt

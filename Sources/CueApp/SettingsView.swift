@@ -19,6 +19,7 @@ struct SettingsView: View {
     @State private var participantNotes = ""
     @State private var editingParticipantID: UUID?
     @State private var showArchivedParticipants = false
+    @State private var pendingVoiceprintDeletionID: UUID?
     @State private var backlogBaseURL = ""
     @State private var backlogProjectID = ""
     @State private var backlogIssueTypeID = ""
@@ -54,6 +55,44 @@ struct SettingsView: View {
                 Text("音声ソースとマイクは次の会議開始時に適用されます。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+
+            Section("話者分離（ローカル）") {
+                Toggle(
+                    "会議後にPC音声を話者ごとに分ける",
+                    isOn: Binding(
+                        get: { model.speakerDiarizationPreferences.isEnabled },
+                        set: { model.setSpeakerDiarizationEnabled($0) }
+                    )
+                )
+                .disabled(model.activeMeeting != nil)
+                Text("有効にすると、PC音声だけを会議中に一時ファイルへ記録し、会議終了後にこのMac内で解析します。一時音声は解析後に削除し、恒久保存しません。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("話者の人数や本人名は確定情報ではありません。会議レビューで候補を確認し、参加者名を割り当ててください。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if model.speakerDiarizationPreferences.isEnabled {
+                    HStack {
+                        Button("モデルを準備") {
+                            Task { await model.prepareSpeakerDiarizationModels() }
+                        }
+                        .disabled(
+                            model.activeMeeting != nil ||
+                                model.isPreparingSpeakerModels
+                        )
+                        if model.isPreparingSpeakerModels {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                    }
+                }
+                if let status = model.speakerDiarizationStatus {
+                    Text(status)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
             }
 
             Section("Project検索") {
@@ -121,6 +160,11 @@ struct SettingsView: View {
                                 Text(scopeDescription(participant))
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
+                                if let voiceprint = model.voiceprint(for: participant.id) {
+                                    Text("声紋登録済み · 更新 \(voiceprint.updatedAt.formatted(date: .abbreviated, time: .shortened))")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
                         }
@@ -138,6 +182,12 @@ struct SettingsView: View {
                             }
                         }
                         .disabled(model.activeMeeting != nil)
+                        if model.voiceprint(for: participant.id) != nil {
+                            Button("声紋を削除", role: .destructive) {
+                                pendingVoiceprintDeletionID = participant.id
+                            }
+                            .disabled(model.activeMeeting != nil)
+                        }
                     }
                 }
 
@@ -364,6 +414,25 @@ struct SettingsView: View {
             if value == .claudeCode {
                 webSearchEnabled = false
             }
+        }
+        .confirmationDialog(
+            "登録済み声紋を削除しますか？",
+            isPresented: Binding(
+                get: { pendingVoiceprintDeletionID != nil },
+                set: { if !$0 { pendingVoiceprintDeletionID = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("声紋を削除", role: .destructive) {
+                guard let participantID = pendingVoiceprintDeletionID else { return }
+                pendingVoiceprintDeletionID = nil
+                Task { await model.deleteVoiceprint(participantID: participantID) }
+            }
+            Button("キャンセル", role: .cancel) {
+                pendingVoiceprintDeletionID = nil
+            }
+        } message: {
+            Text("暗号化済みの声紋だけを削除します。参加者マスターと過去の会議記録は残ります。")
         }
     }
 

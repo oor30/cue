@@ -19,6 +19,12 @@ mkdir -p "$contents_dir/MacOS" "$contents_dir/Resources"
 cp "$binary_path" "$contents_dir/MacOS/Cue"
 cp "$project_root/Resources/Info.plist" "$contents_dir/Info.plist"
 cp "$project_root/Resources/AppIcon.icns" "$contents_dir/Resources/AppIcon.icns"
+fluid_audio_bundle="$project_root/.build/arm64-apple-macosx/$configuration/FluidAudio_FluidAudio.bundle"
+if [[ -d "$fluid_audio_bundle" ]]; then
+    cp -R "$fluid_audio_bundle" "$contents_dir/Resources/"
+fi
+cp "$project_root/LICENSE" "$contents_dir/Resources/Cue-LICENSE.txt"
+cp "$project_root/THIRD_PARTY_NOTICES.md" "$contents_dir/Resources/"
 
 identity=${CODE_SIGN_IDENTITY:--}
 signing_options=(--force --deep --options runtime --sign "$identity")

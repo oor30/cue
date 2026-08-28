@@ -3,6 +3,101 @@ import Testing
 @testable import CueCore
 
 struct SQLiteMeetingRepositoryTests {
+    @Test func persistsReplacesAndDeletesEncryptedVoiceprints() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "CueVoiceprintTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let repository = try SQLiteMeetingRepository(
+            databaseURL: directory.appending(path: "test.sqlite")
+        )
+        let participant = ParticipantProfile(
+            displayName: "暗号化テスト",
+            role: .internalMember
+        )
+        try await repository.saveParticipant(participant)
+        let registeredAt = Date(timeIntervalSince1970: 1_000)
+        let first = EncryptedVoiceprintRecord(
+            participantID: participant.id,
+            encryptedEmbedding: Data([1, 2, 3]),
+            modelIdentifier: "test-model",
+            sampleCount: 2,
+            registeredAt: registeredAt,
+            updatedAt: registeredAt
+        )
+        try await repository.saveVoiceprint(first)
+        let stored = try await repository.voiceprints()
+        #expect(stored.count == 1)
+        #expect(stored.first?.participantID == participant.id)
+        #expect(stored.first?.encryptedEmbedding == Data([1, 2, 3]))
+
+        var replacement = first
+        replacement.encryptedEmbedding = Data([4, 5, 6])
+        replacement.updatedAt = Date(timeIntervalSince1970: 2_000)
+        try await repository.saveVoiceprint(replacement)
+        let replaced = try await repository.voiceprints()
+        #expect(replaced.count == 1)
+        #expect(replaced.first?.encryptedEmbedding == Data([4, 5, 6]))
+
+        try await repository.deleteVoiceprint(participantID: participant.id)
+        #expect(try await repository.voiceprints().isEmpty)
+    }
+
+    @Test func persistsReplacesAndCascadeDeletesSpeakerClusters() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "CueSpeakerClusterTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let repository = try SQLiteMeetingRepository(
+            databaseURL: directory.appending(path: "test.sqlite")
+        )
+        let project = ProjectConfiguration(name: "Diarization", rootPath: directory.path)
+        try await repository.saveProject(project)
+        let meeting = MeetingRecord(
+            projectID: project.id,
+            title: "Speaker Meeting",
+            status: .reviewing
+        )
+        try await repository.createMeeting(meeting)
+        let first = SpeakerClusterRecord(
+            meetingID: meeting.id,
+            clusterKey: "S1",
+            displayLabel: "話者1",
+            sourceSegmentIDs: [UUID()],
+            speechDuration: 12,
+            qualityScore: 0.8
+        )
+        let second = SpeakerClusterRecord(
+            meetingID: meeting.id,
+            clusterKey: "S2",
+            displayLabel: "話者2",
+            sourceSegmentIDs: [UUID(), UUID()],
+            speechDuration: 8,
+            qualityScore: 0.7
+        )
+
+        try await repository.replaceSpeakerClusters(
+            meetingID: meeting.id,
+            clusters: [first, second]
+        )
+        let stored = try await repository.speakerClusters(meetingID: meeting.id)
+        #expect(stored.count == 2)
+        #expect(stored.map(\.id) == [first.id, second.id])
+        #expect(stored.map(\.sourceSegmentIDs) == [first.sourceSegmentIDs, second.sourceSegmentIDs])
+
+        var renamed = first
+        renamed.displayLabel = "田中さん"
+        try await repository.replaceSpeakerClusters(
+            meetingID: meeting.id,
+            clusters: [renamed]
+        )
+        let replaced = try await repository.speakerClusters(meetingID: meeting.id)
+        #expect(replaced.count == 1)
+        #expect(replaced.first?.id == renamed.id)
+        #expect(replaced.first?.displayLabel == "田中さん")
+
+        try await repository.deleteMeeting(id: meeting.id)
+        #expect(try await repository.speakerClusters(meetingID: meeting.id).isEmpty)
+    }
+
     @Test func archivesAndRestoresProjectsAndMeetings() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appending(path: "CueArchiveTests-\(UUID().uuidString)")

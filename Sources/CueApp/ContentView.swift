@@ -293,6 +293,12 @@ private struct MeetingReviewView: View {
                     }
                 }
 
+                if model.isDiarizingSpeakers ||
+                    !model.speakerClusters.isEmpty ||
+                    model.speakerDiarizationStatus != nil {
+                    SpeakerClustersSection(model: model)
+                }
+
                 MeetingAISummarySection(model: model)
 
                 reviewSection("決定事項", values: review.decisions, symbol: "checkmark.seal")
@@ -412,6 +418,140 @@ private struct MeetingReviewView: View {
                 }
             }
         }
+    }
+}
+
+private struct SpeakerClustersSection: View {
+    @Bindable var model: AppModel
+    @State private var pendingVoiceprintCluster: SpeakerClusterRecord?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("PC音声の話者候補", systemImage: "waveform.badge.person.crop")
+                    .font(.title3.bold())
+                Spacer()
+                if model.isDiarizingSpeakers {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+
+            Text("自動分離は候補です。同じ人が複数に分かれたり、別人が統合されたりする可能性があるため、参加者名を確認してください。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            ForEach(model.speakerClusters) { cluster in
+                HStack(alignment: .center, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(cluster.displayLabel)
+                            .font(.headline)
+                        Text(
+                            "発話 \(duration(cluster.speechDuration)) · 文字起こし \(cluster.sourceSegmentIDs.count)件 · 品質目安 \(Int((cluster.qualityScore * 100).rounded()))%"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        if let suggestedParticipantID = cluster.suggestedParticipantID,
+                           let participant = model.meetingParticipantRecords.first(where: {
+                               $0.participantID == suggestedParticipantID
+                           }) {
+                            HStack(spacing: 6) {
+                                Text(
+                                    "声紋候補: \(participant.displayName) · 類似度 \(Int(((cluster.matchConfidence ?? 0) * 100).rounded()))%"
+                                )
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                                Button("候補を確定") {
+                                    Task {
+                                        await model.confirmVoiceprintSuggestion(
+                                            clusterID: cluster.id
+                                        )
+                                    }
+                                }
+                                .buttonStyle(.link)
+                            }
+                        }
+                    }
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 6) {
+                        Menu("参加者を割り当て") {
+                            Button("未割り当てに戻す") {
+                                Task {
+                                    await model.assignSpeakerCluster(
+                                        clusterID: cluster.id,
+                                        participantID: nil
+                                    )
+                                }
+                            }
+                            Divider()
+                            ForEach(model.meetingParticipantRecords) { participant in
+                                Button(participant.displayName) {
+                                    Task {
+                                        await model.assignSpeakerCluster(
+                                            clusterID: cluster.id,
+                                            participantID: participant.participantID
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        .disabled(model.meetingParticipantRecords.isEmpty)
+                        if let participantID = cluster.assignedParticipantID {
+                            Button(
+                                model.voiceprint(for: participantID) == nil
+                                    ? "声紋を登録"
+                                    : "声紋を再登録"
+                            ) {
+                                pendingVoiceprintCluster = cluster
+                            }
+                            .buttonStyle(.borderless)
+                            .disabled(!model.canRegisterVoiceprint(for: cluster))
+                        }
+                    }
+                }
+                .padding(10)
+                .background(.quinary, in: RoundedRectangle(cornerRadius: 8))
+            }
+
+            if model.meetingParticipantRecords.isEmpty,
+               !model.speakerClusters.isEmpty {
+                Text("この会議の参加者名簿が空です。次回会議では開始前に参加者を選択してください。")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            if let status = model.speakerDiarizationStatus {
+                Text(status)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(14)
+        .background(.quinary.opacity(0.6), in: RoundedRectangle(cornerRadius: 12))
+        .confirmationDialog(
+            "この話者特徴を声紋として保存しますか？",
+            isPresented: Binding(
+                get: { pendingVoiceprintCluster != nil },
+                set: { if !$0 { pendingVoiceprintCluster = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("暗号化してこのMacに保存") {
+                guard let cluster = pendingVoiceprintCluster else { return }
+                pendingVoiceprintCluster = nil
+                Task { await model.registerVoiceprint(clusterID: cluster.id) }
+            }
+            Button("キャンセル", role: .cancel) {
+                pendingVoiceprintCluster = nil
+            }
+        } message: {
+            Text("本人確認や認証には使わず、今後の会議で名前候補を表示するためだけに使います。設定から個別に削除できます。")
+        }
+    }
+
+    private func duration(_ seconds: TimeInterval) -> String {
+        let total = max(0, Int(seconds.rounded()))
+        return String(format: "%d:%02d", total / 60, total % 60)
     }
 }
 

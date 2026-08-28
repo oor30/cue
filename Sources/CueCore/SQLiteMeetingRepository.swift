@@ -223,6 +223,112 @@ public actor SQLiteMeetingRepository {
         }
     }
 
+    public func replaceSpeakerClusters(
+        meetingID: UUID,
+        clusters: [SpeakerClusterRecord]
+    ) throws {
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            try execute(
+                "DELETE FROM meeting_speaker_clusters WHERE meeting_id = ?;",
+                bindings: [meetingID.uuidString]
+            )
+            for cluster in clusters {
+                guard cluster.meetingID == meetingID else {
+                    throw RepositoryError.bind(
+                        "speaker cluster belongs to another meeting"
+                    )
+                }
+                let payload = try String(
+                    decoding: encoder.encode(cluster),
+                    as: UTF8.self
+                )
+                try execute(
+                    """
+                    INSERT INTO meeting_speaker_clusters
+                        (id, meeting_id, cluster_key, payload, updated_at)
+                    VALUES (?, ?, ?, ?, ?);
+                    """,
+                    bindings: [
+                        cluster.id.uuidString,
+                        meetingID.uuidString,
+                        cluster.clusterKey,
+                        payload,
+                        Self.timestamp(Date())
+                    ]
+                )
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+    }
+
+    public func speakerClusters(
+        meetingID: UUID
+    ) throws -> [SpeakerClusterRecord] {
+        try query(
+            """
+            SELECT payload FROM meeting_speaker_clusters
+            WHERE meeting_id = ?
+            ORDER BY cluster_key COLLATE NOCASE;
+            """,
+            bindings: [meetingID.uuidString]
+        ) { statement in
+            guard let text = sqlite3_column_text(statement, 0) else {
+                throw RepositoryError.decode("speaker cluster payload is null")
+            }
+            return try decoder.decode(
+                SpeakerClusterRecord.self,
+                from: Data(String(cString: text).utf8)
+            )
+        }
+    }
+
+    public func saveVoiceprint(_ voiceprint: EncryptedVoiceprintRecord) throws {
+        let payload = try String(
+            decoding: encoder.encode(voiceprint),
+            as: UTF8.self
+        )
+        try execute(
+            """
+            INSERT INTO participant_voiceprints
+                (participant_id, payload, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(participant_id) DO UPDATE SET
+                payload = excluded.payload,
+                updated_at = excluded.updated_at;
+            """,
+            bindings: [
+                voiceprint.participantID.uuidString,
+                payload,
+                Self.timestamp(voiceprint.updatedAt)
+            ]
+        )
+    }
+
+    public func voiceprints() throws -> [EncryptedVoiceprintRecord] {
+        try query(
+            "SELECT payload FROM participant_voiceprints ORDER BY updated_at DESC;"
+        ) { statement in
+            guard let text = sqlite3_column_text(statement, 0) else {
+                throw RepositoryError.decode("voiceprint payload is null")
+            }
+            return try decoder.decode(
+                EncryptedVoiceprintRecord.self,
+                from: Data(String(cString: text).utf8)
+            )
+        }
+    }
+
+    public func deleteVoiceprint(participantID: UUID) throws {
+        try execute(
+            "DELETE FROM participant_voiceprints WHERE participant_id = ?;",
+            bindings: [participantID.uuidString]
+        )
+    }
+
     public func meeting(id: UUID) throws -> MeetingRecord? {
         try query(
             """
@@ -986,6 +1092,22 @@ public actor SQLiteMeetingRepository {
                 payload TEXT NOT NULL,
                 assigned_at TEXT NOT NULL,
                 PRIMARY KEY (meeting_id, participant_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS meeting_speaker_clusters (
+                id TEXT PRIMARY KEY,
+                meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+                cluster_key TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (meeting_id, cluster_key)
+            );
+
+            CREATE TABLE IF NOT EXISTS participant_voiceprints (
+                participant_id TEXT PRIMARY KEY
+                    REFERENCES participant_profiles(id) ON DELETE CASCADE,
+                payload TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS transcript_segments (

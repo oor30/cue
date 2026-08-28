@@ -12,6 +12,12 @@ final class AppModel {
     var selectedProjectID: UUID?
     var selectedNextMeetingParticipantIDs: Set<UUID> = []
     var meetingParticipantRecords: [MeetingParticipantRecord] = []
+    var speakerClusters: [SpeakerClusterRecord] = []
+    var speakerDiarizationStatus: String?
+    var isDiarizingSpeakers = false
+    var isPreparingSpeakerModels = false
+    var speakerDiarizationPreferences = SpeakerDiarizationPreferences.load()
+    var voiceprints: [EncryptedVoiceprintRecord] = []
     var activeMeeting: MeetingRecord?
     var transcript: [TranscriptSegment] = []
     var cards: [SuggestionCard] = []
@@ -62,6 +68,8 @@ final class AppModel {
     var isBusy = false
 
     private let repository: SQLiteMeetingRepository?
+    private let supportDirectory: URL?
+    private let speakerDiarizationService: SpeakerDiarizationService?
     private let transcriptionService = SpeechTranscriptionService()
     private var eventDetector = EventDetectionEngine()
     private let stateReducer = MeetingStateReducer()
@@ -72,6 +80,7 @@ final class AppModel {
     private let documentUpdateCoordinator = DocumentUpdateCoordinator()
     private let backlogClient = BacklogClient()
     private let credentialStore = KeychainCredentialStore()
+    private let voiceprintVault = VoiceprintVault()
     private var captureService: ScreenCaptureService?
     private var screenContextService: ScreenContextService?
     private var codexSession: AISessionHandle?
@@ -90,6 +99,9 @@ final class AppModel {
     private var deepAnalysisWorker: Task<Void, Never>?
     private var activePauseInterval: MeetingPauseInterval?
     private var meetingSummaryAnalysisID: UUID?
+    private var speakerAudioRecorder: MeetingSystemAudioRecorder?
+    private var postMeetingTask: Task<Void, Never>?
+    private var currentSpeakerEmbeddings: [String: [Float]] = [:]
     private let maximumQueuedFastAnalyses = 2
     private let maximumFastQueueWait: TimeInterval = 20
 
@@ -135,11 +147,24 @@ final class AppModel {
     init() {
         do {
             let support = try CueDataMigration.prepareSupportDirectory()
-            repository = try SQLiteMeetingRepository(
+            MeetingSystemAudioRecorder.removeAbandonedRecordings(
+                supportDirectory: support
+            )
+            let preparedRepository = try SQLiteMeetingRepository(
                 databaseURL: support.appending(path: CueDataMigration.databaseName)
             )
+            supportDirectory = support
+            repository = preparedRepository
+            speakerDiarizationService = SpeakerDiarizationService(
+                modelDirectory: support.appending(
+                    path: "SpeakerDiarizationModels",
+                    directoryHint: .isDirectory
+                )
+            )
         } catch {
+            supportDirectory = nil
             repository = nil
+            speakerDiarizationService = nil
             startupError = error.localizedDescription
         }
 
@@ -180,6 +205,7 @@ final class AppModel {
         Task { [weak self] in
             await self?.loadProjects()
             await self?.loadParticipants()
+            await self?.loadVoiceprints()
             await self?.refreshProjectBrief()
             self?.configureDesktopIntegration()
         }
@@ -500,6 +526,13 @@ final class AppModel {
             meetingParticipantRecords = try await repository?.meetingParticipants(
                 meetingID: meetingID
             ) ?? []
+            speakerClusters = try await repository?.speakerClusters(
+                meetingID: meetingID
+            ) ?? []
+            speakerDiarizationStatus = speakerClusters.isEmpty
+                ? "この会議には話者分離結果がありません"
+                : nil
+            currentSpeakerEmbeddings = [:]
             meetingAISummary = try await repository?.meetingSummary(meetingID: meetingID)
             meetingSummaryStatus = meetingAISummary == nil
                 ? "AI要約はまだありません"
@@ -778,6 +811,29 @@ final class AppModel {
         meetingAISummary = nil
         meetingSummaryStatus = nil
         isGeneratingMeetingSummary = false
+        postMeetingTask?.cancel()
+        postMeetingTask = nil
+        speakerAudioRecorder?.discard()
+        speakerAudioRecorder = nil
+        speakerClusters = []
+        speakerDiarizationStatus = nil
+        isDiarizingSpeakers = false
+        currentSpeakerEmbeddings = [:]
+        if speakerDiarizationPreferences.isEnabled,
+           audioConfiguration.capturesSystemAudio,
+           let supportDirectory {
+            do {
+                speakerAudioRecorder = try MeetingSystemAudioRecorder(
+                    meetingID: meeting.id,
+                    supportDirectory: supportDirectory
+                )
+                speakerDiarizationStatus = "会議後の話者分離に備えてPC音声を一時記録中"
+            } catch {
+                speakerDiarizationStatus = error.localizedDescription
+            }
+        } else if speakerDiarizationPreferences.isEnabled {
+            speakerDiarizationStatus = "PC音声を使わない会議のため話者分離は行いません"
+        }
         reviewFocusSegmentID = nil
         meetingState = MeetingState(meetingID: meeting.id)
         transcript = []
@@ -837,10 +893,12 @@ final class AppModel {
         )
         screenContextService = screenContext
 
+        let activeSpeakerRecorder = speakerAudioRecorder
         let capture = ScreenCaptureService(
             configuration: audioConfiguration,
-            audioHandler: { [transcriptionService] captured in
+            audioHandler: { [transcriptionService, activeSpeakerRecorder] captured in
                 transcriptionService.submit(captured)
+                activeSpeakerRecorder?.append(captured)
             },
             screenHandler: { [screenContext] frame in
                 screenContext.submit(frame)
@@ -948,6 +1006,15 @@ final class AppModel {
         defer { isBusy = false }
 
         await captureService?.stop()
+        let speakerRecorder = speakerAudioRecorder
+        speakerAudioRecorder = nil
+        let speakerAudioURL: URL?
+        do {
+            speakerAudioURL = try speakerRecorder?.finish()
+        } catch {
+            speakerAudioURL = nil
+            speakerDiarizationStatus = error.localizedDescription
+        }
         await transcriptionService.stop()
         let audioIngress = transcriptionService.ingressDiagnostics()
         captureService = nil
@@ -1035,10 +1102,271 @@ final class AppModel {
         }
         activeMeeting = nil
         if lastReview != nil {
-            Task { [weak self] in
-                await self?.generateMeetingSummary()
+            postMeetingTask?.cancel()
+            postMeetingTask = Task { [weak self] in
+                guard let self else {
+                    if let speakerAudioURL {
+                        try? FileManager.default.removeItem(at: speakerAudioURL)
+                    }
+                    return
+                }
+                await self.processPostMeeting(
+                    meetingID: meeting.id,
+                    speakerAudioURL: speakerAudioURL
+                )
+            }
+        } else if let speakerAudioURL {
+            try? FileManager.default.removeItem(at: speakerAudioURL)
+        }
+    }
+
+    func setSpeakerDiarizationEnabled(_ enabled: Bool) {
+        guard activeMeeting == nil else { return }
+        speakerDiarizationPreferences.isEnabled = enabled
+        speakerDiarizationPreferences.save()
+        speakerDiarizationStatus = enabled
+            ? "初回利用前にモデルを準備してください"
+            : nil
+    }
+
+    func prepareSpeakerDiarizationModels() async {
+        guard activeMeeting == nil,
+              !isPreparingSpeakerModels,
+              let speakerDiarizationService
+        else { return }
+        isPreparingSpeakerModels = true
+        speakerDiarizationStatus = "話者分離モデルを準備しています。初回はダウンロードに時間がかかります"
+        defer { isPreparingSpeakerModels = false }
+        do {
+            try await speakerDiarizationService.prepareModels()
+            speakerDiarizationStatus = "話者分離モデルの準備が完了しました"
+        } catch {
+            speakerDiarizationStatus = "話者分離モデルを準備できませんでした: \(error.localizedDescription)"
+        }
+    }
+
+    private func processPostMeeting(
+        meetingID: UUID,
+        speakerAudioURL: URL?
+    ) async {
+        defer {
+            if let speakerAudioURL {
+                try? FileManager.default.removeItem(at: speakerAudioURL)
+            }
+            postMeetingTask = nil
+        }
+
+        if let speakerAudioURL,
+           speakerDiarizationPreferences.isEnabled,
+           let speakerDiarizationService {
+            isDiarizingSpeakers = true
+            speakerDiarizationStatus = "PC音声をローカルで話者分離しています"
+            do {
+                let finalTranscript = try await repository?.finalSegments(
+                    meetingID: meetingID
+                ) ?? transcript.filter(\.isFinal)
+                let output = try await speakerDiarizationService.analyze(
+                    audioURL: speakerAudioURL,
+                    meetingID: meetingID,
+                    transcript: finalTranscript,
+                    expectedSpeakerCount: meetingParticipantRecords.count
+                )
+                try Task.checkCancellation()
+                for segment in output.transcript {
+                    try await repository?.upsertTranscript(segment)
+                }
+                let matchedClusters = voiceprintSuggestions(
+                    clusters: output.clusters,
+                    embeddings: output.embeddings
+                )
+                try await repository?.replaceSpeakerClusters(
+                    meetingID: meetingID,
+                    clusters: matchedClusters
+                )
+                speakerClusters = matchedClusters
+                currentSpeakerEmbeddings = output.embeddings
+                transcript = output.transcript
+                replaceReviewTranscript(
+                    meetingID: meetingID,
+                    transcript: output.transcript
+                )
+                speakerDiarizationStatus = matchedClusters.isEmpty
+                    ? "発話を検出できなかったため、話者クラスタは作成されませんでした"
+                    : "\(matchedClusters.count)人分の候補に分離しました。参加者名を確認してください"
+            } catch is CancellationError {
+                speakerDiarizationStatus = nil
+            } catch {
+                speakerDiarizationStatus = "話者分離に失敗しました: \(error.localizedDescription)"
+            }
+            isDiarizingSpeakers = false
+        }
+
+        guard !Task.isCancelled else { return }
+        await generateMeetingSummary()
+    }
+
+    func assignSpeakerCluster(
+        clusterID: UUID,
+        participantID: UUID?
+    ) async {
+        guard let clusterIndex = speakerClusters.firstIndex(where: {
+            $0.id == clusterID
+        }) else { return }
+        let participant = participantID.flatMap { id in
+            meetingParticipantRecords.first(where: { $0.participantID == id })
+        }
+        speakerClusters[clusterIndex].assignedParticipantID = participant?.participantID
+        speakerClusters[clusterIndex].suggestedParticipantID = nil
+        speakerClusters[clusterIndex].displayLabel = participant?.displayName
+            ?? defaultClusterLabel(for: speakerClusters[clusterIndex].clusterKey)
+        speakerClusters[clusterIndex].matchConfidence = nil
+
+        let cluster = speakerClusters[clusterIndex]
+        let sourceSegmentIDs = Set(cluster.sourceSegmentIDs)
+        var updatedSegments: [TranscriptSegment] = []
+        for index in transcript.indices where sourceSegmentIDs.contains(transcript[index].id) {
+            transcript[index].speakerClusterID = cluster.clusterKey
+            transcript[index].speakerParticipantID = participant?.participantID
+            transcript[index].speakerLabel = cluster.displayLabel
+            updatedSegments.append(transcript[index])
+        }
+        do {
+            for segment in updatedSegments {
+                try await repository?.upsertTranscript(segment)
+            }
+            try await repository?.replaceSpeakerClusters(
+                meetingID: cluster.meetingID,
+                clusters: speakerClusters
+            )
+            replaceReviewTranscript(
+                meetingID: cluster.meetingID,
+                transcript: transcript
+            )
+        } catch {
+            startupError = "話者の割り当てを保存できませんでした。\n\(error.localizedDescription)"
+        }
+    }
+
+    func confirmVoiceprintSuggestion(clusterID: UUID) async {
+        guard let cluster = speakerClusters.first(where: { $0.id == clusterID }),
+              let participantID = cluster.suggestedParticipantID
+        else { return }
+        await assignSpeakerCluster(
+            clusterID: clusterID,
+            participantID: participantID
+        )
+    }
+
+    func canRegisterVoiceprint(for cluster: SpeakerClusterRecord) -> Bool {
+        cluster.assignedParticipantID != nil &&
+            cluster.speechDuration >= 3 &&
+            currentSpeakerEmbeddings[cluster.clusterKey] != nil
+    }
+
+    func voiceprint(for participantID: UUID) -> EncryptedVoiceprintRecord? {
+        voiceprints.first { $0.participantID == participantID }
+    }
+
+    func registerVoiceprint(clusterID: UUID) async {
+        guard let cluster = speakerClusters.first(where: { $0.id == clusterID }),
+              let participantID = cluster.assignedParticipantID,
+              cluster.speechDuration >= 3,
+              let embedding = currentSpeakerEmbeddings[cluster.clusterKey]
+        else {
+            speakerDiarizationStatus = "3秒以上の発話候補を参加者へ割り当ててから登録してください"
+            return
+        }
+        do {
+            let encryptedEmbedding = try voiceprintVault.encrypt(embedding)
+            let existing = voiceprint(for: participantID)
+            let now = Date()
+            let record = EncryptedVoiceprintRecord(
+                id: existing?.id ?? UUID(),
+                participantID: participantID,
+                encryptedEmbedding: encryptedEmbedding,
+                modelIdentifier: VoiceprintVault.modelIdentifier,
+                sampleCount: max(1, cluster.sourceSegmentIDs.count),
+                registeredAt: existing?.registeredAt ?? now,
+                updatedAt: now
+            )
+            try await repository?.saveVoiceprint(record)
+            await loadVoiceprints()
+            let participantName = meetingParticipantRecords.first(where: {
+                $0.participantID == participantID
+            })?.displayName ?? "参加者"
+            speakerDiarizationStatus = "\(participantName)の声紋を暗号化してこのMacに保存しました"
+        } catch {
+            speakerDiarizationStatus = "声紋を保存できませんでした: \(error.localizedDescription)"
+        }
+    }
+
+    func deleteVoiceprint(participantID: UUID) async {
+        guard activeMeeting == nil else { return }
+        do {
+            try await repository?.deleteVoiceprint(participantID: participantID)
+            await loadVoiceprints()
+            startupError = "声紋を削除しました。再登録は会議レビューから行えます。"
+        } catch {
+            startupError = "声紋を削除できませんでした。\n\(error.localizedDescription)"
+        }
+    }
+
+    private func voiceprintSuggestions(
+        clusters: [SpeakerClusterRecord],
+        embeddings: [String: [Float]]
+    ) -> [SpeakerClusterRecord] {
+        let rosterIDs = Set(meetingParticipantRecords.map(\.participantID))
+        var registeredEmbeddings: [UUID: [Float]] = [:]
+        for record in voiceprints
+        where rosterIDs.contains(record.participantID) &&
+            record.modelIdentifier == VoiceprintVault.modelIdentifier {
+            if let embedding = try? voiceprintVault.decrypt(record) {
+                registeredEmbeddings[record.participantID] = embedding
             }
         }
+        guard !registeredEmbeddings.isEmpty else { return clusters }
+
+        return clusters.map { cluster in
+            guard cluster.speechDuration >= 3,
+                  let embedding = embeddings[cluster.clusterKey],
+                  let match = VoiceprintMatcher.candidate(
+                    for: embedding,
+                    registeredEmbeddings: registeredEmbeddings
+                  )
+            else { return cluster }
+            var suggested = cluster
+            suggested.suggestedParticipantID = match.participantID
+            suggested.matchConfidence = match.similarity
+            return suggested
+        }
+    }
+
+    private func defaultClusterLabel(for clusterKey: String) -> String {
+        let orderedKeys = speakerClusters.map(\.clusterKey).sorted()
+        guard let index = orderedKeys.firstIndex(of: clusterKey) else {
+            return clusterKey
+        }
+        return "話者\(index + 1)"
+    }
+
+    private func replaceReviewTranscript(
+        meetingID: UUID,
+        transcript: [TranscriptSegment]
+    ) {
+        guard let review = lastReview, review.meetingID == meetingID else { return }
+        lastReview = MeetingReviewSnapshot(
+            id: review.id,
+            meetingID: review.meetingID,
+            title: review.title,
+            startedAt: review.startedAt,
+            endedAt: review.endedAt,
+            finalTranscript: transcript,
+            decisions: review.decisions,
+            questions: review.questions,
+            requirements: review.requirements,
+            actionItems: review.actionItems,
+            risks: review.risks
+        )
     }
 
     func selectCaptureTarget() {
@@ -1147,6 +1475,10 @@ final class AppModel {
     }
 
     func closeReview() {
+        postMeetingTask?.cancel()
+        postMeetingTask = nil
+        speakerAudioRecorder?.discard()
+        speakerAudioRecorder = nil
         if let meetingSummaryAnalysisID {
             Task { [codexProvider] in
                 await codexProvider.cancel(analysisID: meetingSummaryAnalysisID)
@@ -1159,6 +1491,10 @@ final class AppModel {
         meetingSummaryStatus = nil
         isGeneratingMeetingSummary = false
         meetingParticipantRecords = []
+        speakerClusters = []
+        speakerDiarizationStatus = nil
+        isDiarizingSpeakers = false
+        currentSpeakerEmbeddings = [:]
         reviewFocusSegmentID = nil
         transcript = []
         cards = []
@@ -1532,6 +1868,14 @@ final class AppModel {
             selectedNextMeetingParticipantIDs.formIntersection(validIDs)
         } catch {
             startupError = "参加者マスターを読み込めませんでした。\n\(error.localizedDescription)"
+        }
+    }
+
+    private func loadVoiceprints() async {
+        do {
+            voiceprints = try await repository?.voiceprints() ?? []
+        } catch {
+            startupError = "声紋一覧を読み込めませんでした。\n\(error.localizedDescription)"
         }
     }
 

@@ -20,17 +20,20 @@ Cueは、macOS上の会議をリアルタイムに文字起こしし、プロジ
 - SQLite/WALへの会議・文字起こし・状態・助言のローカル保存
 - プロジェクト別の全会議一覧、会議・プロジェクトのアーカイブと復元
 - 共通／複数プロジェクト／プロジェクト専用の参加者マスターと会議名簿
+- FluidAudioによる会議後のローカル話者分離と、話者グループへの一括名前割り当て
+- Keychainの端末固有鍵とAES-GCMを使った声紋の暗号化登録、候補照合、削除・再登録
 - AI会議要約、根拠発言への移動、Meeting Review、全文検索、Markdown書き出し
 - メニューバー、右側パネル、変更可能なグローバルショートカット（停止・再開は既定`⌥P`）
 - 診断レポートと長時間品質ゲート
 
-画面画像と生音声は現在保存しません。OCRで抽出した画面コンテキストと、文字起こし・構造化情報だけを保存します。詳しくは[プライバシー方針](PRIVACY.md)を参照してください。
+画面画像と生音声は恒久保存しません。話者分離を明示的に有効化した場合だけ、PC音声を一時ファイルへ記録し、会議後のローカル解析完了時に削除します。利用者が明示登録した声紋は暗号化して保存します。詳しくは[プライバシー方針](PRIVACY.md)を参照してください。
 
 ## アーキテクチャ
 
 ```mermaid
 flowchart LR
     Capture[ScreenCaptureKit] --> STT[SpeechAnalyzer]
+    Capture --> Diarization[FluidAudio<br/>会議後・ローカル]
     Capture --> OCR[Vision OCR]
     STT --> Events[イベント検出]
     OCR --> State[Meeting State]
@@ -38,6 +41,7 @@ flowchart LR
     State --> AI[Codex / Claude Code<br/>Read-Only]
     AI --> Cards[助言カード]
     STT --> DB[(SQLite / WAL)]
+    Diarization --> DB
     State --> DB
     Cards --> DB
     DB --> Review[Meeting Review]
@@ -88,6 +92,8 @@ Zoom検知は自動録音を開始しません。検知後に利用者が「開�
 ```text
 ~/Library/Application Support/Cue/
 ├── cue.sqlite
+├── SpeakerDiarizationModels/
+├── TemporaryAudio/  # 解析後に一時音声を削除
 └── CodexSafeHome/
 ```
 
@@ -98,13 +104,13 @@ Zoom検知は自動録音を開始しません。検知後に利用者が「開�
 - AI Providerは読取り専用sandboxと承認拒否で起動します。
 - Project Rootと許可した追加参照先の外側は根拠として採用しません。
 - Backlog APIキーはSQLiteへ保存せず、端末限定のKeychainへ保存します。
-- 生音声、画面画像、ローカルDB、認証情報はGit管理対象外です。
+- 生音声、画面画像、声紋、ローカルDB、認証情報はGit管理対象外です。
 
 脆弱性の報告方法は[SECURITY.md](SECURITY.md)を参照してください。
 
 ## ロードマップ
 
-話者分離・声紋照合、Zoom RTMS連携を順次進めます。詳細は[ROADMAP.md](ROADMAP.md)にまとめています。
+実会議データでの話者分離評価とZoom RTMS連携を順次進めます。詳細は[ROADMAP.md](ROADMAP.md)にまとめています。
 
 ## 設計資料
 
@@ -116,4 +122,4 @@ Zoom検知は自動録音を開始しません。検知後に利用者が「開�
 
 ## ライセンス
 
-[MIT License](LICENSE)
+Cue本体は[MIT License](LICENSE)です。FluidAudioなどの依存物は[Third-Party Notices](THIRD_PARTY_NOTICES.md)を参照してください。

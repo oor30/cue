@@ -17,6 +17,12 @@ let package = Package(
             targets: ["CueApp"]
         )
     ],
+    dependencies: [
+        .package(
+            url: "https://github.com/FluidInference/FluidAudio.git",
+            exact: "0.15.6"
+        )
+    ],
     targets: [
         .target(
             name: "CueCore",
@@ -26,7 +32,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "CueApp",
-            dependencies: ["CueCore"],
+            dependencies: [
+                "CueCore",
+                .product(name: "FluidAudio", package: "FluidAudio")
+            ],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("AVFoundation"),
