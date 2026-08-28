@@ -22,6 +22,15 @@ struct SQLiteMeetingRepositoryTests {
         )
         try await repository.createMeeting(meeting)
 
+        var pauseInterval = MeetingPauseInterval(
+            meetingID: meeting.id,
+            startedAt: Date(timeIntervalSince1970: 1_010)
+        )
+        try await repository.savePauseInterval(pauseInterval)
+        #expect(try await repository.pauseIntervals(meetingID: meeting.id) == [pauseInterval])
+        pauseInterval.endedAt = Date(timeIntervalSince1970: 1_020)
+        try await repository.savePauseInterval(pauseInterval)
+
         let segment = TranscriptSegment(
             meetingID: meeting.id,
             source: .microphone,
@@ -71,6 +80,7 @@ struct SQLiteMeetingRepositoryTests {
         let segments = try await repository.recentSegments(meetingID: meeting.id)
         let storedDiagnostics = try await repository.diagnostics(meetingID: meeting.id)
         let analyses = try await repository.analysisRecords(meetingID: meeting.id)
+        let pauseIntervals = try await repository.pauseIntervals(meetingID: meeting.id)
 
         #expect(projects == [project])
         #expect(segments.count == 1)
@@ -79,6 +89,7 @@ struct SQLiteMeetingRepositoryTests {
         #expect(segments.first?.isFinal == true)
         #expect(storedDiagnostics == diagnostics)
         #expect(analyses == [analysis])
+        #expect(pauseIntervals == [pauseInterval])
     }
 
     @Test func reopensReadsBackAndCascadeDeletesLargeMeeting() async throws {
@@ -167,5 +178,6 @@ struct SQLiteMeetingRepositoryTests {
         #expect(try await reopened.recentSegments(meetingID: meeting.id).isEmpty)
         #expect(try await reopened.analysisRecords(meetingID: meeting.id).isEmpty)
         #expect(try await reopened.diagnostics(meetingID: meeting.id) == nil)
+        #expect(try await reopened.pauseIntervals(meetingID: meeting.id).isEmpty)
     }
 }

@@ -12,8 +12,9 @@ struct PermissionSnapshot: Sendable {
     let screenCapture: PermissionState
     let microphone: PermissionState
 
-    var isReady: Bool {
-        screenCapture == .granted && microphone == .granted
+    func isReady(requiresMicrophone: Bool) -> Bool {
+        screenCapture == .granted &&
+            (!requiresMicrophone || microphone == .granted)
     }
 }
 
@@ -41,11 +42,12 @@ enum PermissionCenter {
         )
     }
 
-    static func request() async -> PermissionSnapshot {
+    static func request(requiresMicrophone: Bool = true) async -> PermissionSnapshot {
         if !CGPreflightScreenCaptureAccess() {
             _ = CGRequestScreenCaptureAccess()
         }
-        if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
+        if requiresMicrophone,
+           AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
             _ = await AVCaptureDevice.requestAccess(for: .audio)
         }
         return current()

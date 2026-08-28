@@ -24,6 +24,9 @@ final class AppModel {
     var isSearchingPastMeetings = false
     var captureState: CaptureServiceState = .idle
     var transcriptionState: TranscriptionServiceState = .idle
+    var isMeetingPaused = false
+    var audioCapturePreferences = AudioCapturePreferences.load()
+    var microphoneDevices = AudioInputDeviceProvider.availableMicrophones()
     var codexStatus = "未接続"
     var codexErrorDetail: String?
     var codexExecutableDescription: String?
@@ -75,6 +78,7 @@ final class AppModel {
     private var deepAnalysisQueue: [PendingAIAnalysis] = []
     private var fastAnalysisWorker: Task<Void, Never>?
     private var deepAnalysisWorker: Task<Void, Never>?
+    private var activePauseInterval: MeetingPauseInterval?
     private let maximumQueuedFastAnalyses = 2
     private let maximumFastQueueWait: TimeInterval = 20
 
@@ -89,8 +93,17 @@ final class AppModel {
 
     var canRunManualAnalysis: Bool {
         activeMeeting != nil &&
+            !isMeetingPaused &&
             codexSession != nil &&
             transcript.contains(where: \.isFinal)
+    }
+
+    var pauseControlTitle: String {
+        isMeetingPaused ? "記録を再開" : "記録を一時停止"
+    }
+
+    var pauseControlSymbol: String {
+        isMeetingPaused ? "play.fill" : "pause.fill"
     }
 
     init() {
@@ -154,6 +167,33 @@ final class AppModel {
 
     func requestPermissions() async {
         permissionSnapshot = await PermissionCenter.request()
+    }
+
+    func refreshAudioInputDevices() {
+        microphoneDevices = AudioInputDeviceProvider.availableMicrophones()
+        if let selectedID = audioCapturePreferences.microphoneDeviceID,
+           !microphoneDevices.contains(where: { $0.id == selectedID }) {
+            audioCapturePreferences.microphoneDeviceID = nil
+            audioCapturePreferences.save()
+        }
+    }
+
+    func updateAudioCaptureMode(_ mode: AudioCaptureMode) {
+        guard activeMeeting == nil else {
+            startupError = "音声ソースは会議を開始する前に変更してください。"
+            return
+        }
+        audioCapturePreferences.mode = mode
+        audioCapturePreferences.save()
+    }
+
+    func updateMicrophoneDevice(id: String?) {
+        guard activeMeeting == nil else {
+            startupError = "マイクは会議を開始する前に変更してください。"
+            return
+        }
+        audioCapturePreferences.microphoneDeviceID = id
+        audioCapturePreferences.save()
     }
 
     func addProject() async {
@@ -387,9 +427,20 @@ final class AppModel {
             await refreshProjectBrief()
         }
 
-        permissionSnapshot = await PermissionCenter.request()
-        guard permissionSnapshot.isReady else {
-            startupError = "画面収録とマイクの権限を許可してください。"
+        refreshAudioInputDevices()
+        let audioConfiguration = AudioCaptureConfiguration(
+            preferences: audioCapturePreferences,
+            devices: microphoneDevices
+        )
+        permissionSnapshot = await PermissionCenter.request(
+            requiresMicrophone: audioConfiguration.capturesMicrophone
+        )
+        guard permissionSnapshot.isReady(
+            requiresMicrophone: audioConfiguration.capturesMicrophone
+        ) else {
+            startupError = audioConfiguration.capturesMicrophone
+                ? "画面収録とマイクの権限を許可してください。"
+                : "画面収録の権限を許可してください。"
             return
         }
 
@@ -401,7 +452,10 @@ final class AppModel {
         )
         do {
             try await repository?.createMeeting(meeting)
-            try await transcriptionService.start(meetingID: meeting.id)
+            try await transcriptionService.start(
+                meetingID: meeting.id,
+                sources: audioConfiguration.enabledSources
+            )
         } catch {
             meeting.status = .failed
             startupError = error.localizedDescription
@@ -409,6 +463,8 @@ final class AppModel {
         }
 
         activeMeeting = meeting
+        isMeetingPaused = false
+        activePauseInterval = nil
         eventDetector = EventDetectionEngine(
             detector: RuleBasedEventDetector(
                 profile: ProfileRuntimePolicy(project: project)
@@ -451,7 +507,10 @@ final class AppModel {
         let screenContext = ScreenContextService(
             eventHandler: { [weak self] event in
                 Task { @MainActor in
-                    guard let self, var state = self.meetingState else { return }
+                    guard let self,
+                          !self.isMeetingPaused,
+                          var state = self.meetingState
+                    else { return }
                     self.currentScreenEvent = event
                     self.currentScreenContext = event.fullText
                     state.currentScreenContext = event.fullText
@@ -473,6 +532,7 @@ final class AppModel {
         screenContextService = screenContext
 
         let capture = ScreenCaptureService(
+            configuration: audioConfiguration,
             audioHandler: { [transcriptionService] captured in
                 transcriptionService.submit(captured)
             },
@@ -508,6 +568,74 @@ final class AppModel {
         }
     }
 
+    func toggleMeetingPause() async {
+        guard activeMeeting != nil, !isBusy else { return }
+        isBusy = true
+        defer { isBusy = false }
+
+        if isMeetingPaused {
+            await resumeMeeting()
+        } else {
+            await pauseMeeting()
+        }
+    }
+
+    private func pauseMeeting() async {
+        guard var meeting = activeMeeting, !isMeetingPaused else { return }
+
+        isMeetingPaused = true
+        captureService?.setPaused(true)
+        screenContextService?.setPaused(true)
+        await transcriptionService.pause()
+        await cancelActiveAnalyses()
+        fastAnalysisWorker?.cancel()
+        deepAnalysisWorker?.cancel()
+        fastAnalysisWorker = nil
+        deepAnalysisWorker = nil
+        fastAnalysisQueue = []
+        deepAnalysisQueue = []
+        fastAnalysisInProgressEventIDs = []
+        deepAnalysisInProgressEventIDs = []
+
+        let interval = MeetingPauseInterval(meetingID: meeting.id)
+        activePauseInterval = interval
+        meeting.status = .paused
+        activeMeeting = meeting
+        do {
+            try await repository?.savePauseInterval(interval)
+            try await repository?.updateMeeting(meeting)
+        } catch {
+            startupError = "一時停止状態を保存できませんでした。\n\(error.localizedDescription)"
+        }
+    }
+
+    private func resumeMeeting() async {
+        guard var meeting = activeMeeting, isMeetingPaused else { return }
+
+        let resumedAt = Date()
+        if var interval = activePauseInterval {
+            interval.endedAt = resumedAt
+            do {
+                try await repository?.savePauseInterval(interval)
+            } catch {
+                startupError = "再開時刻を保存できませんでした。\n\(error.localizedDescription)"
+            }
+        }
+        activePauseInterval = nil
+        meeting.status = .active
+        activeMeeting = meeting
+        do {
+            try await repository?.updateMeeting(meeting)
+        } catch {
+            startupError = "再開状態を保存できませんでした。\n\(error.localizedDescription)"
+        }
+
+        await transcriptionService.resume()
+        screenContextService?.setPaused(false)
+        isMeetingPaused = false
+        captureService?.setPaused(false)
+    }
+
     func stopMeeting() async {
         guard var meeting = activeMeeting else { return }
         isBusy = true
@@ -538,6 +666,16 @@ final class AppModel {
         desktopIntegration?.hideSidePanel()
 
         let endedAt = Date()
+        if var interval = activePauseInterval {
+            interval.endedAt = endedAt
+            do {
+                try await repository?.savePauseInterval(interval)
+            } catch {
+                startupError = "一時停止区間を確定できませんでした。\n\(error.localizedDescription)"
+            }
+        }
+        activePauseInterval = nil
+        isMeetingPaused = false
         meeting.endedAt = endedAt
         meeting.status = .reviewing
         do {
@@ -1045,7 +1183,8 @@ final class AppModel {
     }
 
     private func handleTranscript(_ segment: TranscriptSegment) async {
-        guard activeMeeting?.id == segment.meetingID,
+        guard !isMeetingPaused,
+              activeMeeting?.id == segment.meetingID,
               var state = meetingState
         else { return }
 
@@ -1126,6 +1265,10 @@ final class AppModel {
     }
 
     func performManualAnalysis(_ action: ManualAnalysisAction) async {
+        guard !isMeetingPaused else {
+            startupError = "記録を再開してからAI分析を実行してください。"
+            return
+        }
         guard let meeting = activeMeeting,
               let state = meetingState,
               let segment = transcript.last(where: \.isFinal)
@@ -1225,6 +1368,7 @@ final class AppModel {
 
     func canPromoteToDeep(_ card: SuggestionCard) -> Bool {
         card.mode == .fast &&
+            !isMeetingPaused &&
             codexSession != nil &&
             detectedEventsByID[card.sourceEventID] != nil &&
             !fastAnalysisInProgressEventIDs.contains(card.sourceEventID) &&
@@ -1256,7 +1400,9 @@ final class AppModel {
         state: MeetingState,
         mode: AnalysisMode
     ) async {
-        guard activeMeeting?.id == event.meetingID else { return }
+        guard !isMeetingPaused,
+              activeMeeting?.id == event.meetingID
+        else { return }
         let inProgress = mode == .fast
             ? fastAnalysisInProgressEventIDs
             : deepAnalysisInProgressEventIDs
@@ -1365,7 +1511,8 @@ final class AppModel {
                 continue
             }
 
-            guard activeMeeting?.id == pending.event.meetingID,
+            guard !isMeetingPaused,
+                  activeMeeting?.id == pending.event.meetingID,
                   meetingState?.topic.id == pending.state.topic.id
             else {
                 if mode == .fast {

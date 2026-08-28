@@ -10,6 +10,7 @@ final class ScreenContextService: @unchecked Sendable {
 
     private let continuation: AsyncStream<CapturedScreenFrame>.Continuation
     private let worker: Task<Void, Never>
+    private let pauseGate: ScreenContextPauseGate
 
     init(
         eventHandler: @escaping EventHandler,
@@ -19,13 +20,16 @@ final class ScreenContextService: @unchecked Sendable {
             of: CapturedScreenFrame.self,
             bufferingPolicy: .bufferingNewest(1)
         )
+        let pauseGate = ScreenContextPauseGate()
         self.continuation = frames.continuation
+        self.pauseGate = pauseGate
         self.worker = Task.detached(priority: .utility) {
             var previous: [ScreenTextObservation] = []
             var lastProcessed = ContinuousClock.now - .seconds(5)
 
             for await frame in frames.stream {
                 guard !Task.isCancelled else { return }
+                guard !pauseGate.isPaused else { continue }
                 let now = ContinuousClock.now
                 guard now - lastProcessed >= .seconds(2) else { continue }
                 lastProcessed = now
@@ -35,7 +39,7 @@ final class ScreenContextService: @unchecked Sendable {
                 metricsHandler(Date().timeIntervalSince(processingStartedAt))
 
                 let changes = Self.diff(current: observations, previous: previous)
-                guard !changes.isEmpty else { continue }
+                guard !pauseGate.isPaused, !changes.isEmpty else { continue }
                 previous = observations
 
                 eventHandler(
@@ -69,7 +73,12 @@ final class ScreenContextService: @unchecked Sendable {
     }
 
     func submit(_ frame: CapturedScreenFrame) {
+        guard !pauseGate.isPaused else { return }
         continuation.yield(frame)
+    }
+
+    func setPaused(_ paused: Bool) {
+        pauseGate.isPaused = paused
     }
 
     private static func recognizeText(
@@ -208,5 +217,15 @@ final class ScreenContextService: @unchecked Sendable {
             width: rect.width,
             height: rect.height
         )
+    }
+}
+
+private final class ScreenContextPauseGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var paused = false
+
+    var isPaused: Bool {
+        get { lock.withLock { paused } }
+        set { lock.withLock { paused = newValue } }
     }
 }

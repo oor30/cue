@@ -186,6 +186,51 @@ public actor SQLiteMeetingRepository {
         try execute("DELETE FROM meetings WHERE id = ?;", bindings: [id.uuidString])
     }
 
+    public func savePauseInterval(_ interval: MeetingPauseInterval) throws {
+        try execute(
+            """
+            INSERT INTO meeting_pause_intervals
+                (id, meeting_id, started_at, ended_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                ended_at = excluded.ended_at;
+            """,
+            bindings: [
+                interval.id.uuidString,
+                interval.meetingID.uuidString,
+                Self.timestamp(interval.startedAt),
+                interval.endedAt.map(Self.timestamp)
+            ]
+        )
+    }
+
+    public func pauseIntervals(meetingID: UUID) throws -> [MeetingPauseInterval] {
+        try query(
+            """
+            SELECT id, started_at, ended_at
+            FROM meeting_pause_intervals
+            WHERE meeting_id = ?
+            ORDER BY started_at ASC;
+            """,
+            bindings: [meetingID.uuidString]
+        ) { statement in
+            guard let idText = sqlite3_column_text(statement, 0),
+                  let id = UUID(uuidString: String(cString: idText)),
+                  let startedText = sqlite3_column_text(statement, 1),
+                  let startedAt = Self.date(String(cString: startedText))
+            else { throw RepositoryError.decode("pause interval row is invalid") }
+            let endedAt = sqlite3_column_text(statement, 2).flatMap {
+                Self.date(String(cString: $0))
+            }
+            return MeetingPauseInterval(
+                id: id,
+                meetingID: meetingID,
+                startedAt: startedAt,
+                endedAt: endedAt
+            )
+        }
+    }
+
     public func upsertTranscript(_ segment: TranscriptSegment) throws {
         let payload = try String(decoding: encoder.encode(segment), as: UTF8.self)
         try execute(
@@ -755,6 +800,16 @@ public actor SQLiteMeetingRepository {
 
             CREATE INDEX IF NOT EXISTS idx_transcript_meeting_time
                 ON transcript_segments(meeting_id, start_time);
+
+            CREATE TABLE IF NOT EXISTS meeting_pause_intervals (
+                id TEXT PRIMARY KEY,
+                meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+                started_at TEXT NOT NULL,
+                ended_at TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_pause_interval_meeting_time
+                ON meeting_pause_intervals(meeting_id, started_at);
 
             CREATE TABLE IF NOT EXISTS meeting_state_snapshots (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -17,6 +17,12 @@ struct MenuBarContent: View {
         } else {
             Text(model.captureState.label)
             Button(
+                "\(model.pauseControlTitle)（\(model.shortcutLabel(for: .togglePause))）"
+            ) {
+                Task { await model.toggleMeetingPause() }
+            }
+            .disabled(model.isBusy)
+            Button(
                 "サイドパネルを表示（\(model.shortcutLabel(for: .togglePanel))）"
             ) {
                 model.showSidePanel()

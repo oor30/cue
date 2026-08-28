@@ -490,6 +490,12 @@ private struct StartMeetingView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                GroupBox("音声入力") {
+                    AudioCaptureSelectionView(model: model)
+                        .padding(.top, 4)
+                }
+                .frame(maxWidth: 520)
+
                 Button {
                     Task { await model.startMeeting() }
                 } label: {
@@ -832,6 +838,13 @@ private struct MeetingWorkspace: View {
                     .disabled(model.isCodexConnecting)
                 }
                 Spacer()
+                Button {
+                    Task { await model.toggleMeetingPause() }
+                } label: {
+                    Label(model.pauseControlTitle, systemImage: model.pauseControlSymbol)
+                }
+                .disabled(model.isBusy)
+                .help("\(model.pauseControlTitle)（\(model.shortcutLabel(for: .togglePause))）")
                 Menu("手動分析") {
                     ForEach(ManualAnalysisAction.allCases) { action in
                         Button {
@@ -848,7 +861,7 @@ private struct MeetingWorkspace: View {
                 Button("サイドパネル") {
                     model.showSidePanel()
                 }
-                if model.captureState != .capturing {
+                if model.captureState != .capturing && model.captureState != .paused {
                     Button("共有対象を選択") {
                         model.selectCaptureTarget()
                     }

@@ -29,6 +29,7 @@ enum TranscriptionServiceState: Equatable, Sendable {
     case idle
     case starting
     case listening
+    case paused
     case recovering(AudioSource, String)
     case failed(AudioSource, String)
     case stopped
@@ -41,6 +42,8 @@ enum TranscriptionServiceState: Equatable, Sendable {
             "文字起こし準備中"
         case .listening:
             "文字起こし中"
+        case .paused:
+            "文字起こし一時停止中"
         case .recovering(let source, _):
             "\(source == .system ? "システム音声" : "マイク")を自動復旧中"
         case .failed:
@@ -209,6 +212,7 @@ actor SpeechTranscriptionService {
     private var recoveryTimestamps: [AudioSource: [Date]] = [:]
     private var meetingID: UUID?
     private var locale: Locale?
+    private var isPaused = false
     private var echoSuppressor = TranscriptEchoSuppressor()
     private let logger = Logger(
         subsystem: "jp.cue.app",
@@ -254,6 +258,7 @@ actor SpeechTranscriptionService {
         ingress.resetDiagnostics()
         recoveryTimestamps.removeAll()
         echoSuppressor = TranscriptEchoSuppressor()
+        isPaused = false
         ensureIngressTasksStarted()
         self.meetingID = meetingID
         self.locale = locale
@@ -295,8 +300,23 @@ actor SpeechTranscriptionService {
     }
 
     private func appendOrdered(_ captured: CapturedAudioBuffer) async {
-        guard meetingID != nil, let channel = channels[captured.source] else { return }
+        guard !isPaused,
+              meetingID != nil,
+              let channel = channels[captured.source]
+        else { return }
         await channel.append(captured)
+    }
+
+    func pause() {
+        guard meetingID != nil, !isPaused else { return }
+        isPaused = true
+        stateContinuation.yield(.paused)
+    }
+
+    func resume() {
+        guard meetingID != nil, isPaused else { return }
+        isPaused = false
+        stateContinuation.yield(.listening)
     }
 
     func stop() async {
@@ -307,6 +327,7 @@ actor SpeechTranscriptionService {
         recoveryTimestamps.removeAll()
         meetingID = nil
         locale = nil
+        isPaused = false
         echoSuppressor = TranscriptEchoSuppressor()
         for channel in activeChannels {
             await channel.finish()
@@ -356,6 +377,7 @@ actor SpeechTranscriptionService {
     }
 
     private func emit(_ segment: TranscriptSegment) {
+        guard !isPaused else { return }
         guard !echoSuppressor.shouldSuppress(segment) else {
             logger.info(
                 "マイク回り込みの重複文字起こしを抑止しました segment=\(segment.id.uuidString, privacy: .public)"
@@ -427,7 +449,7 @@ actor SpeechTranscriptionService {
                 channelGenerations[source] = replacementGeneration
                 recoveringSources.remove(source)
                 if recoveringSources.isEmpty {
-                    stateContinuation.yield(.listening)
+                    stateContinuation.yield(isPaused ? .paused : .listening)
                 }
                 logger.info(
                     "文字起こしの復旧に成功しました source=\(source.rawValue, privacy: .public)"

@@ -43,6 +43,13 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("音声入力") {
+                AudioCaptureSelectionView(model: model)
+                Text("音声ソースとマイクは次の会議開始時に適用されます。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Project検索") {
                 if let project = model.selectedProject {
                     LabeledContent("Project Root", value: project.rootPath)

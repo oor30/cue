@@ -39,6 +39,9 @@ final class DesktopIntegrationController {
             },
             .answerCandidate: { [weak model] in
                 Task { await model?.performManualAnalysis(.answerCandidate) }
+            },
+            .togglePause: { [weak model] in
+                Task { await model?.toggleMeetingPause() }
             }
         ])
         model.shortcutStatus = failures.isEmpty
@@ -222,6 +225,18 @@ private struct MeetingSidePanelView: View {
                         .help(model.transcriptionState.detail ?? "音声認識の状態")
                 }
                 Spacer()
+                if model.activeMeeting != nil {
+                    Button {
+                        Task { await model.toggleMeetingPause() }
+                    } label: {
+                        Image(systemName: model.pauseControlSymbol)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(model.isBusy)
+                    .help(
+                        "\(model.pauseControlTitle)（\(model.shortcutLabel(for: .togglePause))）"
+                    )
+                }
                 Button {
                     model.hideSidePanel()
                 } label: {
@@ -323,6 +338,12 @@ private struct MeetingSidePanelView: View {
                 }
                 .disabled(model.isCodexConnecting)
             }
+            Button {
+                Task { await model.toggleMeetingPause() }
+            } label: {
+                Label(model.pauseControlTitle, systemImage: model.pauseControlSymbol)
+            }
+            .disabled(model.isBusy)
             Button("終了", role: .destructive) {
                 Task { await model.stopMeeting() }
             }

@@ -8,6 +8,7 @@ final class GlobalHotKeyManager {
         case deepAnalyze = 2
         case questionCandidates = 3
         case answerCandidate = 4
+        case togglePause = 5
 
         var keyCode: UInt32 {
             switch self {
@@ -15,6 +16,7 @@ final class GlobalHotKeyManager {
             case .deepAnalyze: UInt32(kVK_ANSI_D)
             case .questionCandidates: UInt32(kVK_ANSI_Q)
             case .answerCandidate: UInt32(kVK_ANSI_A)
+            case .togglePause: UInt32(kVK_ANSI_P)
             }
         }
 
@@ -24,6 +26,7 @@ final class GlobalHotKeyManager {
             case .deepAnalyze: "D"
             case .questionCandidates: "Q"
             case .answerCandidate: "A"
+            case .togglePause: "P"
             }
         }
 
@@ -33,6 +36,7 @@ final class GlobalHotKeyManager {
             case .deepAnalyze: "今の話を深掘り"
             case .questionCandidates: "質問候補"
             case .answerCandidate: "回答候補"
+            case .togglePause: "記録を一時停止／再開"
             }
         }
     }
@@ -161,8 +165,52 @@ struct GlobalShortcutConfiguration: Codable, Equatable, Sendable {
     var deepAnalyze: ShortcutModifierChoice = .option
     var questionCandidates: ShortcutModifierChoice = .option
     var answerCandidate: ShortcutModifierChoice = .option
+    var togglePause: ShortcutModifierChoice = .option
 
     static let storageKey = "globalShortcutConfiguration.v1"
+
+    init(
+        togglePanel: ShortcutModifierChoice = .option,
+        deepAnalyze: ShortcutModifierChoice = .option,
+        questionCandidates: ShortcutModifierChoice = .option,
+        answerCandidate: ShortcutModifierChoice = .option,
+        togglePause: ShortcutModifierChoice = .option
+    ) {
+        self.togglePanel = togglePanel
+        self.deepAnalyze = deepAnalyze
+        self.questionCandidates = questionCandidates
+        self.answerCandidate = answerCandidate
+        self.togglePause = togglePause
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case togglePanel, deepAnalyze, questionCandidates, answerCandidate
+        case togglePause
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        togglePanel = try container.decodeIfPresent(
+            ShortcutModifierChoice.self,
+            forKey: .togglePanel
+        ) ?? .option
+        deepAnalyze = try container.decodeIfPresent(
+            ShortcutModifierChoice.self,
+            forKey: .deepAnalyze
+        ) ?? .option
+        questionCandidates = try container.decodeIfPresent(
+            ShortcutModifierChoice.self,
+            forKey: .questionCandidates
+        ) ?? .option
+        answerCandidate = try container.decodeIfPresent(
+            ShortcutModifierChoice.self,
+            forKey: .answerCandidate
+        ) ?? .option
+        togglePause = try container.decodeIfPresent(
+            ShortcutModifierChoice.self,
+            forKey: .togglePause
+        ) ?? .option
+    }
 
     func choice(for action: GlobalHotKeyManager.Action) -> ShortcutModifierChoice {
         switch action {
@@ -170,6 +218,7 @@ struct GlobalShortcutConfiguration: Codable, Equatable, Sendable {
         case .deepAnalyze: deepAnalyze
         case .questionCandidates: questionCandidates
         case .answerCandidate: answerCandidate
+        case .togglePause: togglePause
         }
     }
 
@@ -182,6 +231,7 @@ struct GlobalShortcutConfiguration: Codable, Equatable, Sendable {
         case .deepAnalyze: deepAnalyze = choice
         case .questionCandidates: questionCandidates = choice
         case .answerCandidate: answerCandidate = choice
+        case .togglePause: togglePause = choice
         }
     }
 

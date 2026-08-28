@@ -138,6 +138,7 @@ public struct ProjectConfiguration: Identifiable, Codable, Hashable, Sendable {
 public enum MeetingStatus: String, Codable, Sendable {
     case preparing
     case active
+    case paused
     case reviewing
     case completed
     case failed
@@ -168,6 +169,25 @@ public struct MeetingRecord: Identifiable, Codable, Hashable, Sendable {
         self.endedAt = endedAt
         self.status = status
         self.codexFastThreadID = codexFastThreadID
+    }
+}
+
+public struct MeetingPauseInterval: Identifiable, Codable, Hashable, Sendable {
+    public let id: UUID
+    public let meetingID: UUID
+    public let startedAt: Date
+    public var endedAt: Date?
+
+    public init(
+        id: UUID = UUID(),
+        meetingID: UUID,
+        startedAt: Date = Date(),
+        endedAt: Date? = nil
+    ) {
+        self.id = id
+        self.meetingID = meetingID
+        self.startedAt = startedAt
+        self.endedAt = endedAt
     }
 }
 

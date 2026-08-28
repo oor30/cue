@@ -9,6 +9,7 @@ enum CaptureServiceState: Equatable, Sendable {
     case selecting
     case starting
     case capturing
+    case paused
     case stopped
     case failed(String)
 
@@ -18,6 +19,7 @@ enum CaptureServiceState: Equatable, Sendable {
         case .selecting: "共有対象を選択中"
         case .starting: "キャプチャ開始中"
         case .capturing: "キャプチャ中"
+        case .paused: "一時停止中"
         case .stopped: "停止"
         case .failed(let message): "エラー: \(message)"
         }
@@ -90,15 +92,19 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable {
     private let audioHandler: AudioHandler
     private let screenHandler: ScreenHandler
     private let stateHandler: StateHandler
+    private let captureConfiguration: AudioCaptureConfiguration
     private let lock = NSLock()
     private var stream: SCStream?
     private var isPickerRegistered = false
+    private var isPaused = false
 
     init(
+        configuration: AudioCaptureConfiguration,
         audioHandler: @escaping AudioHandler,
         screenHandler: @escaping ScreenHandler,
         stateHandler: @escaping StateHandler
     ) {
+        self.captureConfiguration = configuration
         self.audioHandler = audioHandler
         self.screenHandler = screenHandler
         self.stateHandler = stateHandler
@@ -143,6 +149,7 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable {
         let activeStream = lock.withLock {
             let activeStream = stream
             stream = nil
+            isPaused = false
             return activeStream
         }
 
@@ -157,6 +164,20 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable {
         stateHandler(.stopped)
     }
 
+    func setPaused(_ paused: Bool) {
+        let hasActiveStream = lock.withLock {
+            isPaused = paused
+            return stream != nil
+        }
+        if paused {
+            stateHandler(.paused)
+        } else if hasActiveStream {
+            stateHandler(.capturing)
+        } else {
+            stateHandler(.selecting)
+        }
+    }
+
     private func startCapture(filter capturedFilter: CapturedContentFilter) async {
         stateHandler(.starting)
         await stopCurrentStreamIfNeeded()
@@ -167,11 +188,15 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable {
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: 2)
         configuration.queueDepth = 3
         configuration.showsCursor = false
-        configuration.capturesAudio = true
+        configuration.capturesAudio = captureConfiguration.capturesSystemAudio
         configuration.excludesCurrentProcessAudio = true
         configuration.sampleRate = 48_000
         configuration.channelCount = 1
-        configuration.captureMicrophone = true
+        configuration.captureMicrophone = captureConfiguration.capturesMicrophone
+        if captureConfiguration.capturesMicrophone {
+            configuration.microphoneCaptureDeviceID =
+                captureConfiguration.microphoneDeviceID
+        }
 
         let newStream = SCStream(
             filter: capturedFilter.value,
@@ -185,19 +210,24 @@ final class ScreenCaptureService: NSObject, @unchecked Sendable {
                 type: .screen,
                 sampleHandlerQueue: screenQueue
             )
-            try newStream.addStreamOutput(
-                self,
-                type: .audio,
-                sampleHandlerQueue: systemAudioQueue
-            )
-            try newStream.addStreamOutput(
-                self,
-                type: .microphone,
-                sampleHandlerQueue: microphoneQueue
-            )
+            if captureConfiguration.capturesSystemAudio {
+                try newStream.addStreamOutput(
+                    self,
+                    type: .audio,
+                    sampleHandlerQueue: systemAudioQueue
+                )
+            }
+            if captureConfiguration.capturesMicrophone {
+                try newStream.addStreamOutput(
+                    self,
+                    type: .microphone,
+                    sampleHandlerQueue: microphoneQueue
+                )
+            }
             try await newStream.startCapture()
             lock.withLock { stream = newStream }
-            stateHandler(.capturing)
+            let paused = lock.withLock { isPaused }
+            stateHandler(paused ? .paused : .capturing)
         } catch {
             stateHandler(.failed(error.localizedDescription))
         }
@@ -241,7 +271,9 @@ extension ScreenCaptureService: SCStreamOutput {
         didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
         of outputType: SCStreamOutputType
     ) {
-        guard sampleBuffer.isValid else { return }
+        guard sampleBuffer.isValid,
+              !lock.withLock({ isPaused })
+        else { return }
 
         let source: AudioSource
         switch outputType {
